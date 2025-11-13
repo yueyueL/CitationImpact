@@ -211,7 +211,6 @@ impact_reports/
 test_impact_reports/
 exports/
 cache/
-*.csv
 citation_map.html
 citation_info.csv
 test_run.py
