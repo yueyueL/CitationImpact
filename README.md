@@ -27,13 +27,16 @@ I built CitationImpact to answer these questions automatically. Instead of manua
 
 ## What It Does
 
-CitationImpact analyzes your research citations and identifies:
+CitationImpact analyzes your research citations and generates **grant-ready impact statements**:
 
-- 🎯 **Influential citations** – Papers that build on or extend your methodology
-- 👥 **High-profile scholars** – Prominent researchers (by h-index) citing your work  
+- 📋 **Grant Impact Summary** – Copy-ready statements for proposals & tenure files
+- 🏆 **Highly-Cited Papers** – Papers with 100+ citations that cite YOUR work
+- 👥 **High-profile scholars** – Prominent researchers (by h-index & total citations) citing your work  
 - 🏛️ **Institution breakdown** – Universities (with QS/US News rankings), Industry, Government
 - 📚 **Venue quality** – Top-tier journals/conferences (CORE, CCF, h-index rankings)
-- 💾 **Smart caching** – Never wait twice for the same analysis
+- 📈 **Citation velocity** – Track your impact over time with timeline visualization
+- 🔗 **Clickable links** – Every author and paper is linked to their profile
+- 💾 **Smart caching** – Never wait twice for the same analysis (user-controlled refresh)
 
 ---
 
@@ -61,11 +64,21 @@ That's it! The interactive menu will guide you through the rest.
 
 ## How to Use
 
-### Option 1: Analyze a Paper
+### Option 1: My Papers (Recommended)
+
+**Fastest way** – uses your saved profile, minimal CAPTCHAs:
 
 1. Run `./citation-impact`
-2. Select **"1. Analyze a Paper"**
-3. Enter your paper title
+2. Go to **Settings** → Set your Google Scholar ID
+3. Select **"1. 📚 My Papers"**
+4. Pick any of YOUR papers from the list
+5. Get your impact report instantly!
+
+### Option 2: Analyze Any Paper
+
+1. Run `./citation-impact`
+2. Select **"2. 🔍 Search Any Paper"**
+3. Enter any paper title
 4. Wait a minute while it fetches and analyzes citations
 5. Get your impact report!
 
@@ -73,16 +86,16 @@ That's it! The interactive menu will guide you through the rest.
   <img src="assets/Screenshot2-result1.png" alt="Analysis Results" width="700"/>
 </p>
 
-### Option 2: Browse Your Publications
+### Option 3: Browse Another Author's Papers
 
-If you have multiple papers, you can browse them by author:
+Want to analyze papers by someone else?
 
-1. Select **"2. Browse Author Papers"**
-2. Enter your **Semantic Scholar ID** or **Google Scholar ID**
+1. Select **"3. 👤 Browse Other Authors"**
+2. Enter their **Semantic Scholar ID** or **Google Scholar ID**
 3. Pick a paper from the list
 4. Analyze it with one click
 
-**Pro tip:** Save your author ID in Settings (option 6 or 7) so you don't have to enter it every time!
+**Pro tip:** Save your own author ID in Settings so "My Papers" works instantly!
 
 <p align="center">
   <img src="assets/Screenshot3-result.png" alt="Detailed View" width="700"/>
@@ -94,10 +107,60 @@ If you have multiple papers, you can browse them by author:
 
 After analyzing a paper, you'll see:
 
+### 📋 Grant Impact Summary
+- **Ready-to-use statements** – Copy directly into grant proposals
+- **Key metrics** – High-profile scholars, QS Top 100, highly-cited papers
+- **Quick copy text** – One-liner for your CV or bio
+- **Evidence table** – Highly-cited papers (100+ citations) that cite you
+
+Example output:
+```
+✨ Ready-to-Use Impact Statements:
+1. Cited by 12 papers with 100+ citations, demonstrating adoption by high-impact research.
+2. Recognized by 23 high-profile researchers (h-index ≥ 20), including scholars with h-index up to 87.
+3. Adopted by researchers from 15 QS Top 100 universities worldwide.
+
+📝 Quick Copy Text:
+"This work has been cited 168 times, including by 23 high-profile researchers 
+(h-index ≥ 20) from 15 QS Top 100 universities."
+```
+
+### 📄 All Citing Papers
+- See exactly WHO cites your work with **clickable links**
+- **Citation counts** for each citing paper (shows how cited THEY are)
+- **Sort by** year, citation count, or venue
+- View **authors** of any paper with one click
+
+```
+╭──────┬─────────────────────────────────────────┬────────┬────────────────────────┬────────┬─────╮
+│ #    │ Paper (click)                           │  Year  │ Venue                  │  Cites │ 🌟  │
+├──────┼─────────────────────────────────────────┼────────┼────────────────────────┼────────┼─────┤
+│ 1    │ Refining chatgpt-generated code...      │  2024  │ ACM Transactions on... │    175 │ ⭐  │
+│ 2    │ Security weaknesses of copilot...       │  2025  │ ACM Transactions on... │     97 │ ⭐  │
+╰──────┴─────────────────────────────────────────┴────────┴────────────────────────┴────────┴─────╯
+⭐ = Influential citation
+```
+
 ### 📊 Overview
 - Total citations and how many were analyzed
 - Number of influential citations (AI-detected)
 - High-profile scholars citing your work
+
+### 👥 All Citing Authors
+- **Every author** with **clickable profile links** (Google Scholar / Semantic Scholar)
+- **H-index** with source indicator (e.g., `38 (GS)` = from Google Scholar)
+- **Total citations** from their profile
+- **Filter, sort, and export** to CSV
+
+```
+╭──────┬────────────────────┬────────┬────────┬──────────────────────────────┬────────────╮
+│    # │ Author (click)     │      H │  Cites │ Institution                  │ Type       │
+├──────┼────────────────────┼────────┼────────┼──────────────────────────────┼────────────┤
+│    1 │ Xiaogang Wang      │    209 │  45000 │ Jiangnan University          │ education  │
+│    2 │ C. Tantithamtha... │  38 GS │  12000 │ Monash University            │ education  │
+│    3 │ Gaurav Gupta       │  18 GS │   3500 │ Senior Scientist, AWS-AI     │ company    │
+╰──────┴────────────────────┴────────┴────────┴──────────────────────────────┴────────────╯
+```
 
 ### 🏛️ Institution Breakdown
 - **Universities** – with QS/US News rankings (e.g., "MIT - QS #1")
@@ -109,10 +172,19 @@ After analyzing a paper, you'll see:
 - H-index rankings (Tier 1 = flagship venues)
 - CORE, CCF, iCORE rankings for CS venues
 
-### 🌟 High-Profile Scholars
-- Researchers with h-index ≥ 20 (configurable)
-- Their affiliations and university rankings
-- Which papers they wrote that cite you
+### 👥 All Citing Authors
+- **Every author** who cited your work with clickable profile links
+- **H-index** with source indicator (GS = Google Scholar, more accurate)
+- **Total citations** from their profile
+- **Filter & sort** by name, institution, h-index
+- **Export to CSV** for further analysis
+
+### 📄 All Citing Papers
+- **Every paper** that cites you with clickable links
+- **Citation counts** ("Cited by X") for each paper
+- **Year and venue** metadata
+- **Influential markers** (⭐) for AI-detected impactful citations
+- **Sort by** year, citations, or venue
 
 ### 💡 Influential Citations
 - Papers that significantly build on your work
@@ -124,6 +196,7 @@ After analyzing a paper, you'll see:
 - View all papers from a specific venue
 - See all scholars from a university
 - Explore citation contexts
+- **Adaptive tables** – automatically fit your terminal width
 
 ---
 
@@ -135,15 +208,20 @@ Access settings via **"3. Settings"** in the main menu:
 |---------|-------------|---------|
 | **H-Index Threshold** | Minimum h-index for "high-profile" scholars | 20 |
 | **Max Citations** | How many citations to analyze | 100 |
-| **Data Source** | `api` (fast) or `google_scholar` (comprehensive) | api |
+| **Data Source** | `api`, `google_scholar`, or `comprehensive` | comprehensive |
 | **Email** | For OpenAlex API (faster access) | None |
 | **API Key** | Semantic Scholar key (optional, for higher rate limits) | None |
-| **Default Semantic Scholar ID** | Your author ID (saves typing) | None |
-| **Default Google Scholar ID** | Your Google Scholar ID | None |
+| **Default Google Scholar ID** | Your GS ID for "My Papers" feature | None |
+| **Default Semantic Scholar ID** | Your S2 author ID (alternative) | None |
 
 **Get API keys (optional but recommended):**
 - Semantic Scholar: https://www.semanticscholar.org/product/api
 - OpenAlex: Just add your email (no key needed)
+
+**Finding your Google Scholar ID:**
+1. Go to your Google Scholar profile
+2. Look at the URL: `scholar.google.com/citations?user=XXXXXXXXXX`
+3. Copy the `XXXXXXXXXX` part - that's your ID!
 
 ---
 
@@ -152,10 +230,17 @@ Access settings via **"3. Settings"** in the main menu:
 CitationImpact automatically caches everything:
 
 - **Analysis results** → 7 days
-- **Author profiles** → 30 days
+- **Author profiles** → 30 days (indexed by publications for better matching)
+- **My Papers list** → Permanent (you control when to refresh with `r`)
 
 **First analysis:** ~60 seconds (fetching data)  
 **Second analysis:** ~1 second (from cache) ⚡
+
+### My Papers Cache
+Your publications list is cached permanently until YOU decide to refresh:
+- **✓ icon** = Paper's analysis is already cached (instant results)
+- **○ icon** = Paper not yet analyzed
+- Press **`r`** to refresh your publications from Google Scholar
 
 Cache is stored in `.citationimpact/` in your project folder. You can view statistics and clear it via **Settings → 8. Data Location & Cache**.
 
@@ -214,19 +299,24 @@ Paper: Refining ChatGPT-Generated Code: Characterizing and Mitigating Code Quali
   2. IEEE Software (3 citations) • Tier 2 • CORE A
   3. ICSE 2024 (2 citations) • Tier 1 • CORE A* • CCF A
 
-🌟 High-Profile Scholars (Top 5)
-  1. John Doe (h=87) - Stanford University (QS #5)
-  2. Jane Smith (h=65) - MIT (QS #1)
-  3. Bob Johnson (h=54) - Google Research
+👥 High-Profile Scholars (Top 5)
+  ┌────┬──────────────────┬────────┬────────┬─────────────────────────┐
+  │  # │ Author (click)   │      H │  Cites │ Institution             │
+  ├────┼──────────────────┼────────┼────────┼─────────────────────────┤
+  │  1 │ John Doe         │     87 │  45000 │ Stanford University     │
+  │  2 │ Jane Smith       │  65 GS │  32000 │ MIT                     │
+  │  3 │ Bob Johnson      │  54 GS │  18000 │ Google Research         │
+  └────┴──────────────────┴────────┴────────┴─────────────────────────┘
+  (GS) = H-index from Google Scholar (more accurate)
 ```
 
 ---
 
 ## Data Sources
 
-CitationImpact supports two modes:
+CitationImpact supports three modes:
 
-### 1. API Mode (Recommended)
+### 1. API Mode (Fast)
 - **Fast** – No CAPTCHAs, reliable
 - **AI-powered** – Detects influential citations automatically
 - **Sources:** Semantic Scholar + OpenAlex
@@ -234,8 +324,38 @@ CitationImpact supports two modes:
 
 ### 2. Google Scholar Mode
 - **Comprehensive** – Finds papers not in Semantic Scholar
-- **Slower** – Web scraping, may hit CAPTCHAs
+- **Direct URL access** – Uses profile links to minimize CAPTCHAs
 - **Best for:** Papers missing from APIs
+
+### 3. Comprehensive Mode (Recommended) ⭐
+- **Best of both** – Uses ALL available sources
+- **Smart fallbacks:** S2 → GS → Crossref → ORCID → DBLP
+- **Google Scholar for author profiles** (more accurate h-index & citations)
+- **Semantic Scholar for paper data** (API = no CAPTCHAs)
+- **Direct navigation** – Uses GS profile URLs to avoid search CAPTCHAs
+- **Author matching** – Deduplicates by publication overlap
+
+**Data Flow in Comprehensive Mode:**
+```
+┌─────────────────────────────────────────────────────────────┐
+│ YOUR GS PROFILE (My Papers)                                 │
+│ → Direct URL access, no search needed                       │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│ CITATION PAGE (via cites_id)                                │
+│ → Paper titles, author profile links, "Cited by X" counts   │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│ AUTHOR PROFILES                                             │
+│ 1. Google Scholar (if GS ID available) → h-index, citations │
+│ 2. Semantic Scholar API (fallback) → author ID              │
+│ 3. Match by publications if names differ                    │
+└─────────────────────────────────────────────────────────────┘
+```
 
 Switch modes in Settings → 3. Data Source.
 
@@ -299,11 +419,23 @@ CitationImpact/
 ├── .citationimpact/            # Your data (auto-created)
 │   ├── config.json             # Settings & API keys
 │   ├── cache/                  # Analysis results (7 days)
-│   └── author_cache/           # Author profiles (30 days)
+│   ├── author_cache/           # Author profiles (30 days, indexed by publications)
+│   │   └── _index.json         # Publication-based author matching index
+│   └── publications_cache/     # My Papers list (permanent until refresh)
 ├── citationimpact/             # Source code
 │   ├── core/                   # Analysis engine
-│   ├── clients/                # API clients (Semantic Scholar, OpenAlex, Google Scholar)
+│   ├── clients/                # API clients
+│   │   ├── unified.py          # Semantic Scholar + OpenAlex
+│   │   ├── hybrid.py           # Comprehensive mode (all sources)
+│   │   ├── google_scholar.py   # Google Scholar scraping
+│   │   ├── crossref.py         # DOI & venue lookup
+│   │   ├── orcid.py            # Author affiliations
+│   │   └── dblp.py             # CS publication data
 │   ├── ui/                     # Terminal interface
+│   │   ├── app.py              # Main menu & navigation
+│   │   ├── analysis_view.py    # Results display
+│   │   ├── drill_down.py       # Detailed views
+│   │   └── settings.py         # Configuration UI
 │   └── utils/                  # Rankings, institutions, etc.
 ├── data/                       # Ranking datasets
 │   ├── university_rankings/    # QS, US News data
@@ -331,9 +463,11 @@ CitationImpact/
 - Switch to Google Scholar mode if paper is very new
 
 ### Google Scholar CAPTCHAs?
-- Switch to API mode (faster, no CAPTCHAs)
-- Wait a few minutes between searches
-- Use cached results
+- **Use "My Papers"** – Direct profile access = fewer CAPTCHAs
+- **Browser stays open** – Solve once, then it remembers you for the session
+- **Comprehensive mode** – Uses direct URLs from your profile (no search needed!)
+- **Switch to API mode** if you don't need GS data
+- Use cached results when available
 
 ---
 
@@ -428,7 +562,15 @@ Copyright (c) 2024. All rights reserved.
 - [Cursor](https://cursor.sh) – AI-powered code editor
 - [Claude](https://anthropic.com) – AI pair programming assistant
 
-Special thanks to the open-source community and the teams behind Semantic Scholar, OpenAlex, and scholarly.
+**Data Sources:**
+- [Semantic Scholar](https://www.semanticscholar.org/) – Academic paper graph & citations
+- [OpenAlex](https://openalex.org/) – Open bibliographic data
+- [Google Scholar](https://scholar.google.com/) – Comprehensive citation data
+- [Crossref](https://www.crossref.org/) – DOI & publication metadata
+- [ORCID](https://orcid.org/) – Author identification & affiliations
+- [DBLP](https://dblp.org/) – Computer science bibliography
+
+Special thanks to the open-source community and all these amazing services that make academic data accessible.
 
 ---
 

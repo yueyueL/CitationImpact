@@ -15,7 +15,7 @@ project_root = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, project_root)
 
 try:
-    from citationimpact.ui.terminal_ui import main
+    from citationimpact.ui.app import main
     main()
 except ImportError as e:
     print("\n" + "="*70)

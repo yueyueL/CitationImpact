@@ -14,7 +14,7 @@ import requests
 import time
 from typing import Dict, List, Optional
 
-from ..models import Author, Venue, Citation
+from ..models import Author, Venue, Citation, AuthorInfo
 from ..utils import categorize_institution
 
 
@@ -146,41 +146,153 @@ class UnifiedAPIClient:
     def get_author(self, author_name: str) -> Optional[Author]:
         """
         Get author with h-index and affiliation from OpenAlex (cached)
+        
+        NOTE: This method searches by name which can be inaccurate for common names.
+        When possible, use get_author_by_s2_id() with the Semantic Scholar author ID
+        for accurate author identification.
         """
+        # Validate input
+        if not author_name or not author_name.strip():
+            return None
+        
+        author_name = author_name.strip()
+        
         # Check cache first
         if author_name in self._author_cache:
             return self._author_cache[author_name]
-
+        
+        # Generate name variations to try (handles abbreviated names like "C. Smith")
+        name_variations = self._generate_name_variations(author_name)
+        
+        for search_name in name_variations:
+            result = self._search_openalex_author(search_name, author_name)
+            if result and result.affiliation != 'Unknown':
+                return result
+        
+        # Return best result even if affiliation is Unknown
+        for search_name in name_variations:
+            result = self._search_openalex_author(search_name, author_name)
+            if result:
+                return result
+        
+        self._author_cache[author_name] = None
+        return None
+    
+    def _generate_name_variations(self, author_name: str) -> list:
+        """
+        Generate variations of author name for searching.
+        Handles cases like 'C. Tantithamthavorn' -> ['C. Tantithamthavorn', 'Tantithamthavorn']
+        """
+        import re
+        variations = [author_name]
+        
+        # If name has initials (like "C. Smith" or "A. B. Johnson"), try last name only
+        parts = author_name.split()
+        if len(parts) >= 2:
+            # Check if first parts are initials (single letter or letter with period)
+            non_initial_parts = []
+            for part in parts:
+                # Remove periods and check if it's an initial
+                clean = part.replace('.', '').strip()
+                if len(clean) > 1:  # Not an initial
+                    non_initial_parts.append(part)
+            
+            # If we found non-initial parts, add them as a variation
+            if non_initial_parts and len(non_initial_parts) < len(parts):
+                # Add last name only
+                variations.append(non_initial_parts[-1])
+                # Add all non-initial parts
+                if len(non_initial_parts) > 1:
+                    variations.append(' '.join(non_initial_parts))
+        
+        return variations
+    
+    def _search_openalex_author(self, search_name: str, original_name: str) -> Optional[Author]:
+        """
+        Search OpenAlex for an author by name.
+        """
         url = "https://api.openalex.org/authors"
-        params = {'search': author_name, 'per-page': 1}
+        # Request more results to allow for disambiguation
+        params = {'search': search_name, 'per-page': 5}
 
         data = self._make_request(url, params, 'openalex')
         if not data:
-            self._author_cache[author_name] = None
             return None
 
         results = data.get('results', [])
         if not results:
-            self._author_cache[author_name] = None
             return None
 
-        author_data = results[0]
+        # Try to find the best match for the author name
+        # Prefer exact name matches and authors with higher h-index as a tiebreaker
+        best_match = None
+        best_score = -1
+        original_name_lower = original_name.lower().strip()
+        search_name_lower = search_name.lower().strip()
+        
+        for candidate in results:
+            display_name = candidate.get('display_name', '')
+            display_name_lower = display_name.lower().strip()
+            h_index = candidate.get('summary_stats', {}).get('h_index', 0) or 0
+            has_institution = len(candidate.get('last_known_institutions', [])) > 0
+            
+            # Calculate match score
+            score = 0
+            
+            # Check against both original and search name
+            for check_name in [original_name_lower, search_name_lower]:
+                # Exact match is best
+                if display_name_lower == check_name:
+                    score = max(score, 1000)
+                # Name contains search query
+                elif check_name in display_name_lower:
+                    score = max(score, 500)
+                # Display name is contained in search query
+                elif display_name_lower in check_name:
+                    score = max(score, 400)
+                else:
+                    # Partial match - check name parts
+                    query_parts = set(check_name.split())
+                    name_parts = set(display_name_lower.split())
+                    # Remove initials from comparison
+                    query_parts = {p for p in query_parts if len(p.replace('.', '')) > 1}
+                    name_parts = {p for p in name_parts if len(p.replace('.', '')) > 1}
+                    common_parts = query_parts.intersection(name_parts)
+                    if len(common_parts) >= 2:
+                        score = max(score, 300)
+                    elif common_parts:
+                        score = max(score, 100)
+            
+            # IMPORTANT: Prefer authors WITH institution data
+            # This helps when same person appears with/without institution
+            if has_institution:
+                score += 200
+            
+            # Add h-index as a small tiebreaker (max 50 points)
+            score += min(h_index, 50)
+            
+            if score > best_score:
+                best_score = score
+                best_match = candidate
+        
+        if not best_match:
+            return None
 
         # Get affiliation - last_known_institutions is a LIST!
-        institutions = author_data.get('last_known_institutions', [])
+        institutions = best_match.get('last_known_institutions', [])
         affiliation = institutions[0] if institutions else None
 
         author = Author(
-            name=author_data.get('display_name', author_name),
-            h_index=author_data.get('summary_stats', {}).get('h_index', 0),
+            name=best_match.get('display_name', original_name),
+            h_index=best_match.get('summary_stats', {}).get('h_index', 0),
             affiliation=affiliation.get('display_name', 'Unknown') if affiliation else 'Unknown',
             institution_type=affiliation.get('type', 'other') if affiliation else 'other',
-            works_count=author_data.get('works_count', 0),
-            citation_count=author_data.get('cited_by_count', 0)
+            works_count=best_match.get('works_count', 0),
+            citation_count=best_match.get('cited_by_count', 0)
         )
 
-        # Cache the result
-        self._author_cache[author_name] = author
+        # Cache the result under original name
+        self._author_cache[original_name] = author
         return author
 
     def get_venue(self, venue_name: str) -> Optional[Venue]:
@@ -233,11 +345,20 @@ class UnifiedAPIClient:
             return 'Tier 4'
 
     def search_paper(self, title: str) -> Optional[Dict]:
-        """Search for a paper on Semantic Scholar"""
+        """
+        Search for a paper on Semantic Scholar
+        
+        Args:
+            title: Paper title OR Semantic Scholar paper ID (40-char hex string)
+        """
+        # Check if input is a Semantic Scholar paper ID (40-char hex string)
+        if len(title) == 40 and all(c in '0123456789abcdef' for c in title.lower()):
+            return self.get_paper_by_id(title)
+        
         url = "https://api.semanticscholar.org/graph/v1/paper/search"
         params = {
             'query': title,
-            'limit': 1,
+            'limit': 5,  # Get top 5 to find best match
             'fields': 'paperId,title,year,citationCount,influentialCitationCount,authors,venue'
         }
 
@@ -246,14 +367,72 @@ class UnifiedAPIClient:
             return None
 
         results = data.get('data', [])
-        return results[0] if results else None
+        if not results:
+            return None
+        
+        # Find best matching paper by title similarity
+        import re
+        
+        def normalize(s):
+            """Normalize string for comparison"""
+            s = s.lower()
+            s = re.sub(r'[^\w\s]', '', s)
+            return ' '.join(s.split())
+        
+        query_normalized = normalize(title)
+        
+        best_match = None
+        best_score = 0
+        
+        for paper in results:
+            paper_title = paper.get('title', '')
+            paper_normalized = normalize(paper_title)
+            
+            # Calculate word overlap
+            query_words = set(query_normalized.split())
+            paper_words = set(paper_normalized.split())
+            
+            if not query_words or not paper_words:
+                continue
+            
+            # Jaccard similarity
+            intersection = len(query_words & paper_words)
+            union = len(query_words | paper_words)
+            score = intersection / union if union > 0 else 0
+            
+            # Bonus for exact substring match
+            if query_normalized in paper_normalized or paper_normalized in query_normalized:
+                score += 0.3
+            
+            if score > best_score:
+                best_score = score
+                best_match = paper
+        
+        # Require minimum similarity score (0.5 = at least 50% word overlap)
+        if best_score < 0.5:
+            print(f"[WARNING] No good title match found. Best match '{best_match.get('title', '')}' has only {best_score:.0%} similarity")
+            # Still return best match but warn user
+        
+        return best_match
+    
+    def get_paper_by_id(self, paper_id: str) -> Optional[Dict]:
+        """Get paper directly by Semantic Scholar paper ID"""
+        url = f"https://api.semanticscholar.org/graph/v1/paper/{paper_id}"
+        params = {
+            'fields': 'paperId,title,year,citationCount,influentialCitationCount,authors,venue'
+        }
+        
+        data = self._make_request(url, params, 'semantic_scholar')
+        return data if data else None
 
     def get_citations(self, paper_id: str, limit: int = 100) -> List[Citation]:
         """Get citations with contexts and influence from Semantic Scholar"""
         url = f"https://api.semanticscholar.org/graph/v1/paper/{paper_id}/citations"
         params = {
             'limit': limit,
-            'fields': 'contexts,intents,isInfluential,citingPaper.title,citingPaper.authors,citingPaper.venue,citingPaper.year,citingPaper.paperId,citingPaper.externalIds'
+            # Include citationCount & influentialCitationCount for impact analysis
+            # (helps identify "highly-cited papers that cite you")
+            'fields': 'contexts,intents,isInfluential,citingPaper.title,citingPaper.authors,citingPaper.venue,citingPaper.year,citingPaper.paperId,citingPaper.externalIds,citingPaper.citationCount,citingPaper.influentialCitationCount'
         }
 
         data = self._make_request(url, params, 'semantic_scholar')
@@ -266,9 +445,17 @@ class UnifiedAPIClient:
             if not citing_paper:
                 continue
 
-            # FIX: Handle missing authors gracefully
+            # FIX: Handle missing authors gracefully and extract author IDs
             authors = citing_paper.get('authors', [])
             author_names = [a.get('name', 'Unknown') for a in authors] if authors else ['Unknown']
+            
+            # NEW: Extract author IDs for accurate author disambiguation
+            authors_with_ids = []
+            for a in (authors or []):
+                author_name = a.get('name', 'Unknown')
+                author_id = a.get('authorId', '')  # Semantic Scholar unique author ID
+                if author_name and author_name != 'Unknown':
+                    authors_with_ids.append(AuthorInfo(name=author_name, author_id=author_id or ''))
 
             # Extract paper ID, DOI, and construct URL
             paper_id_str = citing_paper.get('paperId', '')
@@ -303,6 +490,10 @@ class UnifiedAPIClient:
             else:
                 venue_name = 'Unknown'
 
+            # Get citation counts for the CITING paper (for impact analysis)
+            citing_paper_citations = citing_paper.get('citationCount', 0) or 0
+            citing_paper_influential = citing_paper.get('influentialCitationCount', 0) or 0
+            
             citations.append(Citation(
                 citing_paper_title=citing_paper.get('title', 'Unknown'),
                 citing_authors=author_names,
@@ -313,7 +504,11 @@ class UnifiedAPIClient:
                 intents=intents,
                 paper_id=paper_id_str,
                 doi=doi,
-                url=paper_url
+                url=paper_url,
+                authors_with_ids=authors_with_ids,
+                # Impact metrics: how cited is the paper that cites you
+                citation_count=citing_paper_citations,
+                influential_citation_count=citing_paper_influential
             ))
 
         return citations
@@ -348,6 +543,160 @@ class UnifiedAPIClient:
 
         data = self._make_request(url, params, 'semantic_scholar')
         return data
+
+    def get_author_by_s2_id(self, author_id: str, author_name: str = None) -> Optional[Author]:
+        """
+        Get Author object by Semantic Scholar author ID (preferred method for accuracy)
+        
+        This method uses the unique S2 author ID to get accurate author information,
+        avoiding the name disambiguation problem that occurs with common names.
+        
+        Args:
+            author_id: Semantic Scholar author ID (unique identifier)
+            author_name: Optional author name (used for cache key and fallback)
+            
+        Returns:
+            Author object with h-index and affiliation, or None if not found
+        """
+        if not author_id:
+            # Fall back to name-based search if no ID provided
+            if author_name:
+                return self.get_author(author_name)
+            return None
+        
+        # Create cache key using S2 author ID for accurate caching
+        cache_key = f"s2:{author_id}"
+        if cache_key in self._author_cache:
+            return self._author_cache[cache_key]
+        
+        # Fetch from Semantic Scholar API
+        url = f"https://api.semanticscholar.org/graph/v1/author/{author_id}"
+        params = {
+            'fields': 'authorId,name,affiliations,paperCount,citationCount,hIndex'
+        }
+        
+        data = self._make_request(url, params, 'semantic_scholar')
+        
+        if not data:
+            # Try fallback to name-based search if S2 lookup fails
+            if author_name:
+                return self.get_author(author_name)
+            self._author_cache[cache_key] = None
+            return None
+        
+        # Extract author information from S2 response
+        name = data.get('name', author_name or 'Unknown')
+        h_index = data.get('hIndex') or 0
+        affiliations = data.get('affiliations', [])
+        s2_affiliation = affiliations[0] if affiliations else None
+        
+        # S2 doesn't provide institution type, default to 'other'
+        institution_type = 'other'
+        affiliation = s2_affiliation or 'Unknown'
+        
+        # ALWAYS try OpenAlex to get institution type and fill missing affiliation
+        # S2 often has incomplete affiliation data
+        if s2_affiliation:
+            # S2 has affiliation - use it to help disambiguate OpenAlex search
+            openalex_author = self._get_openalex_author_by_affiliation(name, s2_affiliation)
+        else:
+            # S2 has no affiliation - try direct OpenAlex name search
+            openalex_author = self.get_author(name)
+        
+        if openalex_author:
+            # Use OpenAlex data to fill gaps
+            if h_index == 0:
+                h_index = openalex_author.h_index
+            if affiliation == 'Unknown':
+                affiliation = openalex_author.affiliation
+            institution_type = openalex_author.institution_type
+        
+        author = Author(
+            name=name,
+            h_index=h_index,
+            affiliation=affiliation,
+            institution_type=institution_type,
+            works_count=data.get('paperCount', 0),
+            citation_count=data.get('citationCount', 0)
+        )
+        
+        # Cache by S2 author ID
+        self._author_cache[cache_key] = author
+        # Also cache by name for backward compatibility
+        if name:
+            self._author_cache[name] = author
+        
+        return author
+    
+    def _get_openalex_author_by_affiliation(self, author_name: str, affiliation: str) -> Optional[Author]:
+        """
+        Get author from OpenAlex with affiliation filter for better disambiguation
+        
+        Args:
+            author_name: Author's name
+            affiliation: Known affiliation to help disambiguate
+            
+        Returns:
+            Author object or None
+        """
+        url = "https://api.openalex.org/authors"
+        # Include affiliation in search for better results
+        search_query = f"{author_name}"
+        params = {
+            'search': search_query,
+            'per-page': 5,  # Get multiple results to find best match
+        }
+        
+        data = self._make_request(url, params, 'openalex')
+        if not data:
+            return None
+        
+        results = data.get('results', [])
+        if not results:
+            return None
+        
+        # Try to find the best matching author based on affiliation
+        best_match = None
+        best_score = 0
+        affiliation_lower = affiliation.lower()
+        
+        for author_data in results:
+            institutions = author_data.get('last_known_institutions', [])
+            if not institutions:
+                continue
+            
+            # Check if any institution matches the known affiliation
+            for inst in institutions:
+                inst_name = inst.get('display_name', '').lower()
+                if affiliation_lower in inst_name or inst_name in affiliation_lower:
+                    # Found a match!
+                    score = 2  # High score for affiliation match
+                else:
+                    score = 1  # Base score
+                
+                if score > best_score:
+                    best_score = score
+                    best_match = author_data
+                    break
+        
+        # If no affiliation match, use first result
+        if not best_match and results:
+            best_match = results[0]
+        
+        if not best_match:
+            return None
+        
+        institutions = best_match.get('last_known_institutions', [])
+        inst = institutions[0] if institutions else None
+        
+        return Author(
+            name=best_match.get('display_name', author_name),
+            h_index=best_match.get('summary_stats', {}).get('h_index', 0),
+            affiliation=inst.get('display_name', 'Unknown') if inst else 'Unknown',
+            institution_type=inst.get('type', 'other') if inst else 'other',
+            works_count=best_match.get('works_count', 0),
+            citation_count=best_match.get('cited_by_count', 0)
+        )
 
     def get_author_publications(self, author_id: str, limit: int = 100) -> List[Dict]:
         """

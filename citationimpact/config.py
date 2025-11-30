@@ -59,7 +59,9 @@ class ConfigManager:
             'max_citations': 100,
             'data_source': 'api',
             'email': None,
-            'api_key': None,
+            'api_key': None,  # Semantic Scholar API key
+            'scraper_api_key': None,  # ScraperAPI key for Google Scholar (https://www.scraperapi.com/)
+            'serpapi_key': None,  # SerpAPI key for Google Scholar (https://serpapi.com/) - MOST RELIABLE
             'timeout': 15,
             'max_retries': 3,
             'default_semantic_scholar_author_id': None,

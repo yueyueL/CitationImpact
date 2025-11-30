@@ -135,6 +135,12 @@ class CitationImpactAnalyzer:
         print("Analyzing citation contexts...")
         influence_data = self._analyze_influence(citations)
 
+        # Step 5: Analyze years
+        year_data = self._analyze_years(citations)
+
+        # Step 6: Calculate grant-friendly impact statistics
+        impact_stats = self._analyze_impact_stats(citations, authors_data)
+
         # Compile results
         result = {
             'paper_title': paper['title'],
@@ -144,7 +150,9 @@ class CitationImpactAnalyzer:
             'error': None,
             **authors_data,
             **venue_data,
-            **influence_data
+            **influence_data,
+            **year_data,
+            'impact_stats': impact_stats  # Grant-friendly summary statistics
         }
 
         self._print_summary(result, h_index_threshold)
@@ -180,11 +188,162 @@ class CitationImpactAnalyzer:
                 'rankings': {}
             },
             'influential_citations': [],
-            'methodological_citations': []
+            'methodological_citations': [],
+            'yearly_stats': [],
+            'impact_stats': {
+                'highly_cited_citing_papers': [],
+                'citation_thresholds': {'over_1000': 0, 'over_500': 0, 'over_100': 0, 'over_50': 0},
+                'author_stats': {'total_unique_authors': 0, 'high_profile_count': 0, 'max_h_index': 0, 'avg_h_index': 0, 'h_over_50': 0, 'h_over_30': 0, 'h_over_20': 0},
+                'institution_stats': {'university_percentage': 0, 'industry_percentage': 0, 'from_qs_top_50': 0, 'from_qs_top_100': 0, 'from_qs_top_200': 0},
+                'recent_citations_count': 0,
+                'summary_statements': []
+            }
         }
 
+    def _analyze_years(self, citations: List[Citation]) -> Dict:
+        """Analyze citations over years"""
+        years = [c.year for c in citations if c.year]
+        year_counts = Counter(years)
+        # Filter out future years or unreasonable past years if necessary, but for now keep all
+        sorted_years = sorted(year_counts.items())
+        return {'yearly_stats': sorted_years}
+
+    def _analyze_impact_stats(self, citations: List[Citation], authors_data: Dict) -> Dict:
+        """
+        Calculate grant-friendly impact statistics.
+        
+        These metrics are designed to be used in grant proposals, tenure files,
+        and funding applications to demonstrate research impact.
+        """
+        # Highly-cited papers that cite you (e.g., papers with 100+ citations)
+        highly_cited_citing = []
+        for c in citations:
+            if hasattr(c, 'citation_count') and c.citation_count >= 50:
+                highly_cited_citing.append({
+                    'title': c.citing_paper_title,
+                    'citations': c.citation_count,
+                    'year': c.year,
+                    'venue': c.venue,
+                    'url': c.url or f"https://www.semanticscholar.org/paper/{c.paper_id}" if c.paper_id else ""
+                })
+        
+        # Sort by citation count descending
+        highly_cited_citing.sort(key=lambda x: x['citations'], reverse=True)
+        
+        # Count papers at different citation thresholds
+        citation_thresholds = {
+            'over_1000': len([c for c in citations if hasattr(c, 'citation_count') and c.citation_count >= 1000]),
+            'over_500': len([c for c in citations if hasattr(c, 'citation_count') and c.citation_count >= 500]),
+            'over_100': len([c for c in citations if hasattr(c, 'citation_count') and c.citation_count >= 100]),
+            'over_50': len([c for c in citations if hasattr(c, 'citation_count') and c.citation_count >= 50]),
+        }
+        
+        # High-profile author stats
+        all_authors = authors_data.get('all_authors', [])
+        high_profile = authors_data.get('high_profile_scholars', [])
+        
+        author_h_indices = [a.get('h_index', 0) for a in all_authors if isinstance(a.get('h_index'), int)]
+        
+        author_stats = {
+            'total_unique_authors': len(all_authors),
+            'high_profile_count': len(high_profile),
+            'max_h_index': max(author_h_indices) if author_h_indices else 0,
+            'avg_h_index': sum(author_h_indices) / len(author_h_indices) if author_h_indices else 0,
+            'h_over_50': len([h for h in author_h_indices if h >= 50]),
+            'h_over_30': len([h for h in author_h_indices if h >= 30]),
+            'h_over_20': len([h for h in author_h_indices if h >= 20]),
+        }
+        
+        # Institution prestige stats
+        institutions = authors_data.get('institutions', {})
+        university_count = institutions.get('University', 0)
+        industry_count = institutions.get('Industry', 0)
+        total_inst = university_count + industry_count + institutions.get('Government', 0) + institutions.get('Other', 0)
+        
+        # Count authors from ranked universities
+        details = institutions.get('details', {})
+        qs_top_50 = 0
+        qs_top_100 = 0
+        qs_top_200 = 0
+        
+        for author in details.get('University', []):
+            rank = author.get('university_rank')
+            if rank:
+                if rank <= 50:
+                    qs_top_50 += 1
+                if rank <= 100:
+                    qs_top_100 += 1
+                if rank <= 200:
+                    qs_top_200 += 1
+        
+        institution_stats = {
+            'university_percentage': (university_count / total_inst * 100) if total_inst > 0 else 0,
+            'industry_percentage': (industry_count / total_inst * 100) if total_inst > 0 else 0,
+            'from_qs_top_50': qs_top_50,
+            'from_qs_top_100': qs_top_100,
+            'from_qs_top_200': qs_top_200,
+        }
+        
+        # Recent impact (last 2 years)
+        from datetime import datetime
+        current_year = datetime.now().year
+        recent_citations = [c for c in citations if c.year and c.year >= current_year - 2]
+        
+        return {
+            'highly_cited_citing_papers': highly_cited_citing[:20],  # Top 20
+            'citation_thresholds': citation_thresholds,
+            'author_stats': author_stats,
+            'institution_stats': institution_stats,
+            'recent_citations_count': len(recent_citations),
+            'summary_statements': self._generate_impact_statements(
+                citation_thresholds, author_stats, institution_stats, len(citations)
+            )
+        }
+    
+    def _generate_impact_statements(self, citation_thresholds: Dict, author_stats: Dict, 
+                                    institution_stats: Dict, total_analyzed: int) -> List[str]:
+        """Generate ready-to-use impact statements for grants/proposals."""
+        statements = []
+        
+        # Highly-cited paper statement
+        if citation_thresholds['over_100'] > 0:
+            statements.append(
+                f"Cited by {citation_thresholds['over_100']} papers with 100+ citations, "
+                f"demonstrating adoption by high-impact research."
+            )
+        
+        # High-profile scholars statement
+        if author_stats['high_profile_count'] > 0:
+            statements.append(
+                f"Recognized by {author_stats['high_profile_count']} high-profile researchers "
+                f"(h-index ≥ 20), including scholars with h-index up to {author_stats['max_h_index']}."
+            )
+        
+        # Prestigious universities statement
+        if institution_stats['from_qs_top_100'] > 0:
+            statements.append(
+                f"Adopted by researchers from {institution_stats['from_qs_top_100']} "
+                f"QS Top 100 universities worldwide."
+            )
+        
+        # Cross-sector impact
+        if institution_stats['industry_percentage'] > 5:
+            statements.append(
+                f"Demonstrates industry relevance with {institution_stats['industry_percentage']:.0f}% "
+                f"of citations from industry researchers."
+            )
+        
+        # Academic adoption
+        if institution_stats['university_percentage'] > 70:
+            statements.append(
+                f"Strong academic adoption with {institution_stats['university_percentage']:.0f}% "
+                f"of citations from university researchers."
+            )
+        
+        return statements
+
     def _analyze_authors(self, citations: List[Citation], h_index_threshold: int) -> Dict:
-        """Analyze citing authors"""
+        """Analyze citing authors with proper deduplication"""
         all_authors = []
         high_profile = []
         institutions = defaultdict(list)
@@ -192,17 +351,162 @@ class CitationImpactAnalyzer:
         # Simpler progress message
         print(f"Processing {len(citations)} citations for author information...")
         
+        # Track processed authors - store best version of each author
+        # Key: normalized name + affiliation, Value: author_dict with best h-index
+        author_registry = {}  # {(normalized_name, affiliation): author_dict}
+        processed_author_ids = set()
+        
+        def _normalize_for_dedup(name: str) -> str:
+            """Normalize name for deduplication - handles 'C. Tantithamthavorn' vs 'Chakkrit Tantithamthavorn'"""
+            if not name:
+                return ""
+            import re
+            # Remove periods and extra spaces
+            normalized = re.sub(r'\.', '', name.lower().strip())
+            normalized = ' '.join(normalized.split())
+            # Extract last name for comparison (helps with abbreviated first names)
+            parts = normalized.split()
+            return parts[-1] if parts else ""  # Use last name as primary key
+        
+        # OPTIMIZATION: Batch fetch all GS author profiles FIRST
+        # This is much faster than fetching one by one!
+        all_gs_ids = set()
+        for citation in citations:
+            if hasattr(citation, 'authors_with_ids') and citation.authors_with_ids:
+                for author_info in citation.authors_with_ids:
+                    author_id = author_info.author_id
+                    if author_id:
+                        # Handle combined IDs like "gs:XXX|s2:YYY"
+                        if '|' in author_id:
+                            for part in author_id.split('|'):
+                                if part.startswith('gs:'):
+                                    all_gs_ids.add(part[3:])
+                        elif author_id.startswith('gs:'):
+                            all_gs_ids.add(author_id[3:])
+        
+        # Batch fetch all GS profiles (from cache or GS)
+        gs_profiles_cache = {}
+        if all_gs_ids and hasattr(self.api, 'batch_fetch_gs_authors'):
+            print(f"[Analyzer] Pre-fetching {len(all_gs_ids)} Google Scholar profiles...")
+            gs_profiles_cache = self.api.batch_fetch_gs_authors(list(all_gs_ids))
+        
         for citation in citations:
             # FIX: Check if author list is not empty before processing
             if not citation.citing_authors:
                 continue
 
-            for author_name in citation.citing_authors[:3]:  # First 3 authors
+            # Prefer authors_with_ids if available (contains S2 author IDs for disambiguation)
+            authors_to_process = []
+            if hasattr(citation, 'authors_with_ids') and citation.authors_with_ids:
+                # Use AuthorInfo objects with unique IDs
+                for author_info in citation.authors_with_ids[:3]:  # First 3 authors
+                    authors_to_process.append({
+                        'name': author_info.name,
+                        'author_id': author_info.author_id
+                    })
+            else:
+                # Fallback to name-only list (backward compatibility)
+                for author_name in citation.citing_authors[:3]:
+                    authors_to_process.append({
+                        'name': author_name,
+                        'author_id': ''
+                    })
+            
+            for author_data in authors_to_process:
+                author_name = author_data['name']
+                author_id = author_data['author_id']
+                
                 # Skip if author name is Unknown or empty
                 if not author_name or author_name == 'Unknown':
                     continue
+                
+                # Skip if we've already processed this exact author ID
+                if author_id and author_id in processed_author_ids:
+                    continue
+                if author_id:
+                    processed_author_ids.add(author_id)
 
-                author = self.api.get_author(author_name)
+                # COMPREHENSIVE MODE: Google Scholar is PRIMARY!
+                # Priority:
+                # 1. GS ID from citation page (direct profile link)
+                # 2. GS ID from cache (found via publication matching)
+                # 3. S2 data (only if GS not available)
+                
+                author = None
+                gs_id_part = None
+                s2_id_part = None
+                
+                # Parse IDs from author_id
+                if author_id:
+                    if '|' in author_id:
+                        for part in author_id.split('|'):
+                            if part.startswith('gs:'):
+                                gs_id_part = part[3:]
+                            elif part.startswith('s2:'):
+                                s2_id_part = part[3:]
+                            else:
+                                s2_id_part = part
+                    elif author_id.startswith('gs:'):
+                        gs_id_part = author_id[3:]
+                    elif author_id.startswith('s2:'):
+                        s2_id_part = author_id[3:]
+                    else:
+                        s2_id_part = author_id
+                
+                # PRIORITY 1: Direct GS ID from citation page
+                if gs_id_part:
+                    if gs_id_part in gs_profiles_cache:
+                        author = gs_profiles_cache[gs_id_part]
+                    elif hasattr(self.api, 'get_author_by_gs_id'):
+                        author = self.api.get_author_by_gs_id(gs_id_part, author_name)
+                
+                # PRIORITY 2: Find GS ID from cache (via publication or name matching)
+                if not author:
+                    from citationimpact.cache import get_author_cache
+                    author_cache = get_author_cache()
+                    
+                    # Try to find cached GS profile by name or S2 ID
+                    cached_info = author_cache.get_by_any_id(
+                        name=author_name,
+                        semantic_scholar_id=s2_id_part
+                    )
+                    
+                    if cached_info and cached_info.get('google_scholar_id'):
+                        # Found GS ID in cache! Use GS profile
+                        gs_id_from_cache = cached_info['google_scholar_id']
+                        if gs_id_from_cache in gs_profiles_cache:
+                            author = gs_profiles_cache[gs_id_from_cache]
+                        elif hasattr(self.api, 'get_author_by_gs_id'):
+                            author = self.api.get_author_by_gs_id(gs_id_from_cache, author_name)
+                    
+                    # Also try publication matching for the citing paper
+                    if not author:
+                        citing_paper_title = citation.citing_paper_title if hasattr(citation, 'citing_paper_title') else ''
+                        if citing_paper_title:
+                            pub_match = author_cache.find_by_publications(
+                                [{'title': citing_paper_title}], 
+                                min_overlap=1
+                            )
+                            if pub_match and pub_match.get('google_scholar_id'):
+                                gs_id_from_pub = pub_match['google_scholar_id']
+                                if gs_id_from_pub in gs_profiles_cache:
+                                    author = gs_profiles_cache[gs_id_from_pub]
+                                elif hasattr(self.api, 'get_author_by_gs_id'):
+                                    author = self.api.get_author_by_gs_id(gs_id_from_pub, author_name)
+                
+                # PRIORITY 3: Use S2 to find author (may still get GS via hybrid client)
+                if not author and s2_id_part and hasattr(self.api, 'get_author_by_s2_id'):
+                    author = self.api.get_author_by_s2_id(s2_id_part, author_name)
+                
+                # PRIORITY 4: Search by paper title to find author
+                if not author:
+                    citing_paper_title = citation.citing_paper_title if hasattr(citation, 'citing_paper_title') else ''
+                    if hasattr(self.api, 'get_author_by_paper') and citing_paper_title:
+                        author = self.api.get_author_by_paper(author_name, citing_paper_title)
+                
+                # PRIORITY 5: Final fallback to name-based lookup
+                if not author:
+                    author = self.api.get_author(author_name)
                 if not author:
                     continue
 
@@ -236,32 +540,87 @@ class CitationImpactAnalyzer:
                                 university_rank = primary_data.get('rank')
                                 university_tier = primary_data.get('tier')
 
+                # Create author dict with h-index display (add GS marker if from Google Scholar)
+                h_index_display = author.h_index
+                h_index_source = getattr(author, 'h_index_source', '')
+                if h_index_source == 'google_scholar':
+                    h_index_display = f"{author.h_index} (GS)"
+                
                 author_dict = {
                     'name': author.name,
                     'h_index': author.h_index,
+                    'h_index_display': h_index_display,  # For display with source marker
                     'affiliation': author.affiliation,
-                    'university_rank': university_rank,  # Add QS ranking
-                    'university_tier': university_tier,  # Add QS tier
+                    'institution_type': author.institution_type,
+                    'university_rank': university_rank,
+                    'university_tier': university_tier,
                     'usnews_rank': usnews_rank,
                     'usnews_tier': usnews_tier,
                     'university_rankings': university_rankings,
                     'primary_university_source': primary_university_source,
                     'citing_paper': citation.citing_paper_title,
-                    'paper_url': getattr(citation, 'url', ''),  # Add URL for clickable links
-                    'paper_id': getattr(citation, 'paper_id', '')  # Add paper ID for link construction
+                    'citing_papers': [citation.citing_paper_title],  # Track all citing papers
+                    'paper_url': getattr(citation, 'url', ''),
+                    'paper_id': getattr(citation, 'paper_id', ''),
+                    'paper_citations': getattr(citation, 'citation_count', 0),  # Citing paper's citation count
+                    'year': getattr(citation, 'year', 0),  # Citing paper's year
+                    'venue': getattr(citation, 'venue', 'Unknown'),  # Citing paper's venue
+                    'google_scholar_id': getattr(author, 'google_scholar_id', ''),
+                    'semantic_scholar_id': getattr(author, 'semantic_scholar_id', ''),
+                    'orcid_id': getattr(author, 'orcid_id', ''),
+                    'homepage': getattr(author, 'homepage', ''),
+                    'h_index_source': h_index_source,
+                    'total_citations': getattr(author, 'citation_count', 0),  # Author's total citations from profile
+                    'works_count': getattr(author, 'works_count', 0)  # Author's total works
                 }
-                all_authors.append(author_dict)
+                
+                # Deduplication: Check if we already have this author (by last name + affiliation)
+                dedup_key = (_normalize_for_dedup(author.name), author.affiliation or 'Unknown')
+                
+                if dedup_key in author_registry:
+                    # Existing author - merge and keep best h-index
+                    existing = author_registry[dedup_key]
+                    existing['citing_papers'].append(citation.citing_paper_title)
+                    
+                    # Prefer Google Scholar h-index (more accurate)
+                    # or keep higher h-index if both from same source
+                    existing_is_gs = existing.get('h_index_source') == 'google_scholar'
+                    new_is_gs = h_index_source == 'google_scholar'
+                    
+                    if new_is_gs and not existing_is_gs:
+                        # New one has GS h-index, use it
+                        existing['h_index'] = author.h_index
+                        existing['h_index_display'] = h_index_display
+                        existing['h_index_source'] = h_index_source
+                    elif new_is_gs == existing_is_gs and author.h_index > existing['h_index']:
+                        # Same source, keep higher
+                        existing['h_index'] = author.h_index
+                        existing['h_index_display'] = h_index_display
+                    
+                    # Use longer/better name (prefer full name over abbreviated)
+                    if len(author.name) > len(existing['name']):
+                        existing['name'] = author.name
+                    
+                    # Update IDs if we have better ones
+                    if not existing.get('google_scholar_id') and author_dict.get('google_scholar_id'):
+                        existing['google_scholar_id'] = author_dict['google_scholar_id']
+                    if not existing.get('semantic_scholar_id') and author_dict.get('semantic_scholar_id'):
+                        existing['semantic_scholar_id'] = author_dict['semantic_scholar_id']
+                else:
+                    # New author - add to registry
+                    author_registry[dedup_key] = author_dict
+                    
+                    # Categorize institution
+                    category = self.api.categorize_institution(author.institution_type, author.affiliation)
+                    institutions[category].append(author_dict)
 
-                # High-profile?
-                if author.h_index >= h_index_threshold:
-                    high_profile.append(author_dict)
-
-                # Categorize institution (use both type and affiliation name for better accuracy)
-                category = self.api.categorize_institution(author.institution_type, author.affiliation)
-                institutions[category].append(author_dict)
-
+        # Build final lists from deduplicated registry
+        all_authors = list(author_registry.values())
+        high_profile = [a for a in all_authors if a['h_index'] >= h_index_threshold]
+        
         # Sort by h-index
         high_profile.sort(key=lambda x: x['h_index'], reverse=True)
+        all_authors.sort(key=lambda x: x['h_index'], reverse=True)
 
         return {
             'all_authors': all_authors,
@@ -478,7 +837,10 @@ def analyze_paper_impact(
     timeout: int = 15,
     max_retries: int = 3,
     use_proxy: bool = False,
-    use_cache: bool = True
+    use_cache: bool = True,
+    scraper_api_key: str = None,
+    gs_cites_id: list = None,  # For direct GS citation access (from My Papers)
+    existing_client = None  # Pass existing API client to reuse browser session
 ) -> Dict:
     """
     Analyze citation impact for a paper
@@ -492,19 +854,23 @@ def analyze_paper_impact(
         data_source: Data source to use (default: 'api')
             - 'api': Use Semantic Scholar + OpenAlex APIs (RECOMMENDED - fast, reliable)
             - 'google_scholar': Use Google Scholar scraping (slow, may encounter CAPTCHAs)
+            - 'comprehensive': Use BOTH S2 and GS for maximum coverage (slower but most complete)
         semantic_scholar_key: Optional S2 API key (free from semanticscholar.org)
         email: Optional email for OpenAlex polite pool
         timeout: Request timeout in seconds (default: 15)
         max_retries: Max retry attempts for failed requests (default: 3)
-        use_proxy: Use proxy for Google Scholar (only applies if data_source='google_scholar')
+        use_proxy: Use free proxy for Google Scholar (unreliable)
+        gs_cites_id: List of Google Scholar citation IDs for direct access (from My Papers)
         use_cache: Use cached results if available (default: True)
+        scraper_api_key: ScraperAPI key for reliable Google Scholar access (recommended for 'comprehensive' mode)
+                        Get key at: https://www.scraperapi.com/
 
     Returns:
         Complete analysis with:
         - High-profile scholars (with real h-indices!)
         - Institution breakdown (University/Industry/Government)
         - Venue rankings (based on h-index, works for ANY field!)
-        - Influential citations (AI-detected, only with 'api' source)
+        - Influential citations (AI-detected, with 'api' or 'comprehensive' source)
 
     Example (Recommended - API-based):
         >>> result = analyze_paper_impact(
@@ -515,6 +881,14 @@ def analyze_paper_impact(
         ... )
         >>> print(f"High-profile scholars: {len(result['high_profile_scholars'])}")
 
+    Example (Comprehensive - combines both sources):
+        >>> result = analyze_paper_impact(
+        ...     "Your Paper Title",
+        ...     h_index_threshold=20,
+        ...     max_citations=50,
+        ...     data_source='comprehensive'
+        ... )
+        
     Example (Google Scholar - for papers not in Semantic Scholar):
         >>> result = analyze_paper_impact(
         ...     "Your Paper Title",
@@ -531,8 +905,9 @@ def analyze_paper_impact(
     if not isinstance(max_retries, int) or max_retries < 1:
         raise ValueError("max_retries must be at least 1")
 
-    if data_source not in ['api', 'google_scholar']:
-        raise ValueError(f"Invalid data_source: {data_source}. Must be 'api' or 'google_scholar'")
+    valid_sources = ['api', 'google_scholar', 'comprehensive']
+    if data_source not in valid_sources:
+        raise ValueError(f"Invalid data_source: {data_source}. Must be one of {valid_sources}")
 
     # Check cache first
     if use_cache:
@@ -549,27 +924,58 @@ def analyze_paper_impact(
         if cached_result:
             return cached_result
 
+    # Use existing client if provided (reuses browser session!)
+    api = existing_client
+    
     # No cache hit, perform analysis
-    if data_source == 'api':
-        from ..clients import get_api_client
-        api = get_api_client(semantic_scholar_key, email, timeout, max_retries)
-    elif data_source == 'google_scholar':
-        from ..clients import get_google_scholar_client
-        api = get_google_scholar_client(use_proxy=use_proxy)
-        print("\n⚠️  Using Google Scholar (web scraping)")
-        print("   - This is SLOWER than API-based approach")
-        print("   - May encounter CAPTCHAs")
-        print("   - No influential citations or citation contexts")
-        print("   - Use 'api' data source when possible\n")
-    else:
-        raise ValueError(f"Invalid data_source: {data_source}. Must be 'api' or 'google_scholar'")
+    if not api:
+        if data_source == 'api':
+            from ..clients import get_api_client
+            api = get_api_client(semantic_scholar_key, email, timeout, max_retries)
+        elif data_source == 'comprehensive':
+            from ..clients import get_hybrid_client
+            api = get_hybrid_client(
+                semantic_scholar_key=semantic_scholar_key,
+                email=email,
+                use_gs_proxy=use_proxy,
+                scraper_api_key=scraper_api_key,
+                timeout=timeout,
+                max_retries=max_retries,
+                gs_cites_id=gs_cites_id  # Pass for direct citation access (no GS search!)
+            )
+            print("\n🔄 Using Comprehensive Mode (Semantic Scholar + Google Scholar)")
+            print("   - S2 API for paper search (no CAPTCHA)")
+            print("   - Uses S2 author IDs for accurate disambiguation")
+            if gs_cites_id:
+                print("   - ✓ Using DIRECT GS citation URLs (no search needed!)")
+            else:
+                print("   - Supplements with GS citations if available")
+            print()
+        elif data_source == 'google_scholar':
+            from ..clients import get_google_scholar_client
+            api = get_google_scholar_client(use_proxy=use_proxy, scraper_api_key=scraper_api_key)
+            print("\n⚠️  Using Google Scholar (web scraping)")
+            print("   - This is SLOWER than API-based approach")
+            print("   - May encounter CAPTCHAs")
+            print("   - No influential citations or citation contexts")
+            print("   - Use 'api' data source when possible\n")
+        else:
+            raise ValueError(f"Invalid data_source: {data_source}. Must be 'api', 'google_scholar', or 'comprehensive'")
 
     # Pass data_source to analyzer so it can provide accurate error messages
     analyzer = CitationImpactAnalyzer(api, data_source=data_source)
+    
     result = analyzer.analyze_paper(paper_title, h_index_threshold, max_citations)
 
     # Save to cache
     if use_cache and not result.get('error'):
         cache.set(paper_title, params, result)
 
+    # Store client reference in result so caller can reuse it
+    # (browser stays open for entire session to avoid CAPTCHAs)
+    result['_client'] = api
+    
     return result
+    # NOTE: DO NOT close the client here!
+    # The browser should stay open for the entire session to avoid CAPTCHAs.
+    # The client will be closed when the main app exits.
