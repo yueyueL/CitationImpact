@@ -12,6 +12,7 @@ from rich import box
 from .components.prompts import (
     get_adaptive_widths, make_author_clickable, make_paper_clickable, get_field
 )
+from .components.tables import confidence_marker, CONFIDENCE_LEGEND
 
 
 def _format_rankings(info: Dict[str, Any]) -> str:
@@ -238,8 +239,10 @@ def show_venue_details(console: Console, result: Dict[str, Any]):
         venue_info = rankings.get(venue_name, {})
         h_index = venue_info.get('h_index', 'N/A')
         tier = venue_info.get('rank_tier', 'N/A')
-        core = venue_info.get('core_rank', '—')
-        ccf = venue_info.get('ccf_rank', '—')
+        # Keys are stored with explicit None for missing sources, so a
+        # plain .get() default would render the literal string 'None'
+        core = venue_info.get('core_rank') or '—'
+        ccf = venue_info.get('ccf_rank') or '—'
         
         # Truncate long venue names
         display_name = venue_name
@@ -331,7 +334,7 @@ def show_venue_details(console: Console, result: Dict[str, Any]):
 
 
 
-def show_scholar_details(console: Console, result: Dict[str, Any]):
+def show_scholar_details(console: Console, result: Dict[str, Any], h_index_threshold: int = 20):
     """Show all high-profile scholars with details and clickable links"""
     console.clear()
     widths = get_adaptive_widths(console.width or 120)
@@ -350,7 +353,7 @@ def show_scholar_details(console: Console, result: Dict[str, Any]):
         Prompt.ask("\nPress Enter to continue")
         return
     
-    console.print(f"\n[info]Found {len(scholars)} high-profile scholars (h-index ≥ 20)[/info]")
+    console.print(f"\n[info]Found {len(scholars)} high-profile scholars (h-index ≥ {h_index_threshold})[/info]")
     
     # Sort options
     console.print("[dim]Sort by: [1] H-Index [2] Name [3] Institution[/dim]")
@@ -499,6 +502,35 @@ def show_influential_details(console: Console, result: Dict[str, Any]):
     Prompt.ask("\nPress Enter to continue")
 
 
+# Width of the optional 'Ctry' column (2-letter ISO code or '-')
+_CTRY_COLUMN_WIDTH = 4
+
+
+def _country_column_fits(console_width: int) -> bool:
+    """
+    Check whether a dedicated 'Ctry' column fits the all-authors table
+    within the adaptive width budget from get_adaptive_widths.
+
+    Sums every column's (max) width plus Rich's per-column padding and
+    border characters; when the total would exceed the terminal width the
+    caller shows the country appended after the affiliation instead.
+    """
+    widths = get_adaptive_widths(console_width)
+    column_widths = [
+        widths['rank'],
+        widths['author'],
+        widths['h_index'],
+        7,  # Cites
+        widths['institution'] - 5,
+        widths['type'],
+        widths['paper'],
+        _CTRY_COLUMN_WIDTH,
+    ]
+    # Boxed tables: 2 padding chars per column + (n + 1) border chars
+    budget = sum(column_widths) + 2 * len(column_widths) + len(column_widths) + 1
+    return budget <= max(console_width or 80, 80)
+
+
 def show_all_authors_view(console: Console, result: Dict[str, Any]):
     """Show ALL citing authors with filtering and sorting options."""
     all_authors = result.get('all_authors', [])
@@ -510,7 +542,11 @@ def show_all_authors_view(console: Console, result: Dict[str, Any]):
     
     # Get adaptive widths
     widths = get_adaptive_widths(console.width or 120)
-    
+
+    # Dedicated country column only when it fits the width budget; on
+    # narrower terminals the country is appended dim after the affiliation
+    show_ctry_column = _country_column_fits(console.width or 120)
+
     # Main loop for filtering
     current_filter = None
     min_h_index = 0
@@ -559,39 +595,56 @@ def show_all_authors_view(console: Console, result: Dict[str, Any]):
         table.add_column("H", justify="right", style="yellow", width=widths['h_index'])
         table.add_column("Cites", justify="right", style="green", width=7)  # Total citations
         table.add_column("Institution", style="cyan", max_width=widths['institution'] - 5)
+        if show_ctry_column:
+            table.add_column("Ctry", style="cyan", width=_CTRY_COLUMN_WIDTH)
         table.add_column("Type", style="dim", width=widths['type'])
         table.add_column("Citing Paper (click)", max_width=widths['paper'])
-        
+
         # Show first 30 authors
         display_count = min(30, len(filtered_authors))
         for idx, author in enumerate(filtered_authors[:display_count], 1):
             h_index = author.get('h_index', 0)
             h_source = author.get('h_index_source', '')
             h_display = f"{h_index} [dim](GS)[/dim]" if h_source == 'google_scholar' else str(h_index)
-            
+
             # Total citations from author's profile
             total_cites = author.get('total_citations', 0)
             cites_display = str(total_cites) if total_cites > 0 else '-'
-            
+
             affiliation = author.get('affiliation', 'Unknown')
             max_aff_len = widths['institution'] - 8
             if len(affiliation) > max_aff_len:
                 affiliation = affiliation[:max_aff_len-3] + "..."
-            
+
+            # Institution country (ISO alpha-2, '' when unknown)
+            country = author.get('country', '') or ''
+            if not show_ctry_column and country:
+                affiliation = f"{affiliation} [dim]{country}[/dim]"
+
             inst_type = author.get('institution_type', 'Unknown')
-            
+
             # Make author clickable
             author_display = make_author_clickable(author, widths['author'])
-            
+
+            # Match-confidence marker: how reliably this author was matched
+            author_display = f"{author_display} {confidence_marker(author.get('match_confidence', ''))}"
+
             # Make paper clickable
             paper_display = make_paper_clickable(author, widths['paper'])
-            
-            table.add_row(str(idx), author_display, h_display, cites_display, affiliation, inst_type, paper_display)
-        
+
+            row = [str(idx), author_display, h_display, cites_display, affiliation]
+            if show_ctry_column:
+                row.append(country or '-')
+            row.extend([inst_type, paper_display])
+            table.add_row(*row)
+
         if len(filtered_authors) > display_count:
-            table.add_row("", f"[dim]... and {len(filtered_authors) - display_count} more[/dim]", "", "", "", "", "")
-        
+            more_row = ["", f"[dim]... and {len(filtered_authors) - display_count} more[/dim]"]
+            more_row.extend([""] * (5 + (1 if show_ctry_column else 0)))
+            table.add_row(*more_row)
+
         console.print(table)
+        console.print(f"[dim]{CONFIDENCE_LEGEND}[/dim]")
         
         # Options menu
         console.print("\n[bold cyan]━━━ OPTIONS ━━━[/bold cyan]")

@@ -1,13 +1,13 @@
 """
 Analysis results display for CitationImpact.
 """
-import json
-from datetime import datetime
-from typing import Dict, Any, List
+import os
+from typing import Dict, Any, List, Optional
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich.prompt import Prompt
+from rich.markup import escape
 from rich import box
 
 from .components.prompts import (
@@ -20,6 +20,8 @@ from .components.tables import (
     create_venue_table,
     create_scholar_table,
     create_papers_table,
+    confidence_marker,
+    CONFIDENCE_LEGEND,
 )
 from .drill_down import (
     show_institution_details,
@@ -30,10 +32,15 @@ from .drill_down import (
 
 class AnalysisView:
     """Handles displaying analysis results."""
-    
-    def __init__(self, console: Console):
+
+    def __init__(self, console: Console, config: Optional[Dict[str, Any]] = None):
         self.console = console
-    
+        self.config = config or {}
+
+    def _h_index_threshold(self) -> int:
+        """The user-configured high-profile h-index threshold."""
+        return self.config.get('h_index_threshold', 20)
+
     def display_results(self, result: Dict[str, Any]):
         """Display analysis results with interactive drill-down."""
         if not result:
@@ -54,7 +61,9 @@ class AnalysisView:
             self.console.print("  [highlight]4[/highlight] 🏛️  By Institution")
             self.console.print("  [highlight]5[/highlight] 📚 By Venue")
             self.console.print("  [highlight]6[/highlight] 📈 Timeline & Stats")
-            self.console.print("  [highlight]e[/highlight] 💾 Export Report")
+            self.console.print("  [highlight]7[/highlight] 💬 How Your Work Is Used (citation contexts)")
+            self.console.print("  [highlight]8[/highlight] 🌳 Citation Tree")
+            self.console.print("  [highlight]e[/highlight] 💾 Export Report (markdown/latex/csv/bibtex/json)")
             self.console.print("  [highlight]b[/highlight] Back to Menu")
 
             choice = Prompt.ask("\n[bold]Select option[/bold]", default="b").lower()
@@ -74,6 +83,11 @@ class AnalysisView:
                 show_venue_details(self.console, result)
             elif choice == '6':
                 self.show_deep_insights(result)
+            elif choice == '7':
+                self.show_citation_contexts(result)
+            elif choice == '8':
+                from .tree_view import show_citation_tree
+                show_citation_tree(self.console, result)
             elif choice == 'e':
                 self.export_results(result)
 
@@ -84,6 +98,24 @@ class AnalysisView:
 
     def _render_summary(self, result: Dict[str, Any]) -> None:
         """Render the main summary panels."""
+        # Data-quality banner FIRST (data_quality is absent on results from
+        # older caches, so every access is defensive)
+        data_quality = result.get('data_quality')
+        if not isinstance(data_quality, dict):
+            data_quality = {}
+        dq_warnings = [str(w) for w in (data_quality.get('warnings') or []) if w]
+        if data_quality.get('degraded'):
+            warning_text = "\n".join(f"⚠ {escape(w)}" for w in dq_warnings) or \
+                "⚠ API failures occurred during this analysis; data may be incomplete."
+            self.console.print(Panel(
+                warning_text,
+                title="⚠ Data May Be Incomplete",
+                border_style="yellow",
+                padding=(0, 2)
+            ))
+        elif dq_warnings:
+            self.console.print(f"[dim]Note: {escape(' '.join(dq_warnings))}[/dim]")
+
         # Header
         header_panel = Panel(
             f"[bold]{result.get('paper_title', 'Analysis')}[/bold]",
@@ -98,16 +130,62 @@ class AnalysisView:
         overview_table = create_overview_table(result)
         self.console.print(Panel(overview_table, title="📈 Overview", border_style="cyan"))
 
+        # Field-normalized impact + independence (when available)
+        extra_lines = []
+        field_normalized = result.get('field_normalized')
+        if field_normalized:
+            fwci = field_normalized.get('fwci')
+            if fwci is not None:
+                extra_lines.append(
+                    f"[bold]FWCI:[/bold] [yellow]{fwci:.2f}[/yellow] "
+                    f"[dim](1.0 = world average for field & year, via OpenAlex)[/dim]"
+                )
+            percentile = field_normalized.get('citation_percentile')
+            if percentile is not None:
+                pct = percentile * 100 if percentile <= 1 else percentile
+                badge = ""
+                if field_normalized.get('is_top_1_percent'):
+                    badge = " [bold green]TOP 1%[/bold green]"
+                elif field_normalized.get('is_top_10_percent'):
+                    badge = " [bold green]TOP 10%[/bold green]"
+                extra_lines.append(
+                    f"[bold]Field citation percentile:[/bold] [yellow]{pct:.0f}[/yellow]{badge}"
+                )
+        self_stats = result.get('self_citation_stats')
+        if self_stats:
+            extra_lines.append(
+                f"[bold]Independent citations:[/bold] [yellow]{self_stats.get('independent_count', 0)}"
+                f"/{result.get('analyzed_citations', 0)}[/yellow] "
+                f"[dim]({self_stats.get('independent_percentage', 0):.0f}% not self-citations)[/dim]"
+            )
+        if extra_lines:
+            self.console.print(Panel(
+                "\n".join(extra_lines),
+                title="🌍 Field-Normalized Impact",
+                border_style="yellow"
+            ))
+
         # Quick Impact Highlights (for grants) - show key numbers
         impact_stats = result.get('impact_stats', {})
         if impact_stats:
             thresholds = impact_stats.get('citation_thresholds', {})
             author_stats = impact_stats.get('author_stats', {})
             inst_stats = impact_stats.get('institution_stats', {})
-            
+
+            # Profile quality line: how reliably citing authors were matched
+            # (counts may be absent on results served from an older cache)
+            id_count = author_stats.get('id_matched_count', 0) or 0
+            verified_count = author_stats.get('verified_count', 0) or 0
+            name_only_count = author_stats.get('name_only_count', 0) or 0
+            if (id_count + verified_count + name_only_count) > 0:
+                self.console.print(
+                    f"[dim]Author profiles: {id_count} ID-matched, "
+                    f"{verified_count} verified, {name_only_count} name-only[/dim]"
+                )
+
             highlights = []
             if author_stats.get('high_profile_count', 0) > 0:
-                highlights.append(f"[green]✓[/green] {author_stats['high_profile_count']} high-profile scholars (h≥20)")
+                highlights.append(f"[green]✓[/green] {author_stats['high_profile_count']} high-profile scholars (h≥{self._h_index_threshold()})")
             if inst_stats.get('from_qs_top_100', 0) > 0:
                 highlights.append(f"[green]✓[/green] {inst_stats['from_qs_top_100']} from QS Top 100")
             if thresholds.get('over_100', 0) > 0:
@@ -129,6 +207,16 @@ class AnalysisView:
             self.console.print(Panel(inst_table, title="🏛️ Institution Summary", border_style="magenta"))
         else:
             self.console.print(Panel("[dim]No institution data available[/dim]", title="🏛️ Institution Summary", border_style="magenta"))
+
+        # International reach: known citing-author countries (absent on results
+        # from older caches; '' / unknown countries are never counted)
+        country_counts = (result.get('countries') or {}).get('counts') or {}
+        if country_counts:
+            top_countries = sorted(country_counts.items(), key=lambda kv: kv[1], reverse=True)[:3]
+            top_display = ", ".join(f"{code} {count}" for code, count in top_countries)
+            self.console.print(
+                f"[dim]International reach: {len(country_counts)} countries (top: {top_display})[/dim]"
+            )
 
         # Venue summary
         venues = result.get('venues', {})
@@ -168,8 +256,11 @@ class AnalysisView:
                 if info.get('google_scholar_id'):
                     gs_url = f"https://scholar.google.com/citations?user={info['google_scholar_id']}"
                     author_name = f"[link={gs_url}]{info['name']}[/link]"
+                # Match-confidence marker: how reliably this author was matched
+                author_name = f"{author_name} {confidence_marker(info.get('match_confidence', ''))}"
                 scholar_table.add_row(str(idx), author_name, str(info['h_index_display']), institution, citing_display)
             self.console.print(Panel(scholar_table, title="🌟 High-Profile Scholars (Top 5)", border_style="magenta"))
+            self.console.print(f"[dim]{CONFIDENCE_LEGEND}[/dim]")
         else:
             self.console.print(Panel("[dim]No high-profile scholars identified yet[/dim]", title="🌟 High-Profile Scholars", border_style="magenta"))
 
@@ -216,6 +307,7 @@ class AnalysisView:
             'paper_id': get_field(scholar, 'paper_id', ''),
             'google_scholar_id': get_field(scholar, 'google_scholar_id', ''),
             'semantic_scholar_id': get_field(scholar, 'semantic_scholar_id', ''),
+            'match_confidence': get_field(scholar, 'match_confidence', '') or '',
             'university_rankings': get_field(scholar, 'university_rankings', {}) or {},
             'university_rank': get_field(scholar, 'university_rank', None),
             'university_tier': get_field(scholar, 'university_tier', None),
@@ -239,10 +331,6 @@ class AnalysisView:
             'paper_id': paper_id
         }
 
-    def _serialize_citation(self, citation) -> Dict[str, Any]:
-        """Convert a citation to a JSON-serializable dict."""
-        return self._extract_paper_info(citation)
-    
     def _extract_paper_info(self, citation) -> Dict[str, Any]:
         """Extract paper info from a citation object or dict."""
         if isinstance(citation, dict):
@@ -431,7 +519,14 @@ class AnalysisView:
         impact_stats = result.get('impact_stats', {})
         
         # 1. Ready-to-use impact statements
-        statements = impact_stats.get('summary_statements', [])
+        # The analyzer hardcodes "h-index ≥ 20" in its copy-ready statements;
+        # substitute the user's configured threshold so the text stays
+        # factually correct with non-default settings.
+        threshold = self._h_index_threshold()
+        statements = [
+            s.replace('h-index ≥ 20', f'h-index ≥ {threshold}')
+            for s in impact_stats.get('summary_statements', [])
+        ]
         if statements:
             self.console.print("\n[bold green]✨ Ready-to-Use Impact Statements[/bold green]")
             self.console.print("[dim]Copy these directly into your grant proposal:[/dim]\n")
@@ -455,7 +550,7 @@ class AnalysisView:
         metrics_table.add_row(
             "High-Profile Scholars",
             str(author_stats.get('high_profile_count', 0)),
-            f"Authors with h-index ≥ 20 citing your work"
+            f"Authors with h-index ≥ {self._h_index_threshold()} citing your work"
         )
         metrics_table.add_row(
             "Max Citing Author H-Index",
@@ -482,7 +577,22 @@ class AnalysisView:
             f"{inst_stats.get('university_percentage', 0):.0f}%",
             "Academic adoption rate"
         )
-        
+
+        field_normalized = result.get('field_normalized')
+        if field_normalized and field_normalized.get('fwci') is not None:
+            metrics_table.add_row(
+                "Field-Weighted Citation Impact",
+                f"{field_normalized['fwci']:.2f}",
+                "1.0 = world average for field & year (OpenAlex)"
+            )
+        self_stats = result.get('self_citation_stats')
+        if self_stats:
+            metrics_table.add_row(
+                "Independent Citations",
+                f"{self_stats.get('independent_percentage', 0):.0f}%",
+                "Citations not involving the original authors"
+            )
+
         self.console.print(metrics_table)
         
         # 3. Highly-cited papers that cite you
@@ -532,7 +642,7 @@ class AnalysisView:
         hp_count = author_stats.get('high_profile_count', 0)
         top_uni = inst_stats.get('from_qs_top_100', 0)
         
-        quick_text = f'"This work has been cited {total} times, including by {hp_count} high-profile researchers (h-index ≥ 20) from {top_uni} QS Top 100 universities."'
+        quick_text = f'"This work has been cited {total} times, including by {hp_count} high-profile researchers (h-index ≥ {self._h_index_threshold()}) from {top_uni} QS Top 100 universities."'
         self.console.print(f"  [green]{quick_text}[/green]")
         
         Prompt.ask("\n\nPress Enter to return")
@@ -618,56 +728,83 @@ class AnalysisView:
 
         Prompt.ask("\nPress Enter to return")
 
+    def show_citation_contexts(self, result: Dict[str, Any]):
+        """Show HOW citing papers use this work: intents and context quotes."""
+        self.console.clear()
+        self.console.print(Panel(
+            "[title]💬 HOW YOUR WORK IS USED[/title]\n[dim]Citation intents and in-text context from citing papers (Semantic Scholar)[/dim]",
+            expand=False,
+            border_style="cyan"
+        ))
+
+        insights = result.get('citation_insights') or {}
+        intent_counts = insights.get('intent_counts') or {}
+        context_samples = insights.get('context_samples') or []
+
+        if not intent_counts and not context_samples:
+            self.console.print("\n[warning]No citation context data available.[/warning]")
+            self.console.print("[dim]Context/intent data comes from the Semantic Scholar API — "
+                               "it is not available in pure Google Scholar mode.[/dim]")
+            Prompt.ask("\nPress Enter to return")
+            return
+
+        if intent_counts:
+            intent_labels = {
+                'methodology': 'Methodology (uses your methods)',
+                'background': 'Background (builds on your ideas)',
+                'result': 'Result (compares against your findings)',
+                'uses': 'Uses (applies your work)',
+                'extends': 'Extends (develops your work further)',
+            }
+            display = {intent_labels.get(k, k.capitalize()): v
+                       for k, v in sorted(intent_counts.items(), key=lambda kv: -kv[1])}
+            self._render_ascii_bar_chart("🎯 Citation Intent Distribution", display, "cyan")
+
+        if context_samples:
+            self.console.print("[bold green]📝 Sample Citation Contexts[/bold green]")
+            self.console.print("[dim]How citing papers describe your work in their text:[/dim]\n")
+            for i, sample in enumerate(context_samples[:10], 1):
+                context = sample.get('context', '')
+                if len(context) > 300:
+                    context = context[:297] + "..."
+                # Contexts/titles come verbatim from citing papers' text and
+                # routinely contain [bracketed] tokens that Rich would parse
+                # as markup (silently dropping them or raising MarkupError)
+                context = escape(context)
+                title = escape(sample.get('title') or 'Unknown')
+                url = sample.get('url', '')
+                title_display = f"[link={url}]{title}[/link]" if url else title
+                # dict.get returns None for present-but-null keys; avoid '(None)'
+                year = sample.get('year') or 'N/A'
+                marker = " ⭐" if sample.get('is_influential') else ""
+                self.console.print(f"  [cyan]{i}.[/cyan] [italic]“{context}”[/italic]")
+                self.console.print(f"     [dim]— {title_display} ({year}){marker}[/dim]\n")
+
+        Prompt.ask("\nPress Enter to return")
+
     def export_results(self, result: Dict[str, Any]):
-        """Export results to a file."""
+        """Export results to a file in the chosen format."""
+        from citationimpact.export import export_report, EXPORT_FORMATS, default_export_filename
+
+        fmt = Prompt.ask(
+            "[bold]Export format[/bold]",
+            choices=list(EXPORT_FORMATS),
+            default="markdown"
+        )
+
+        default_name = default_export_filename(result, fmt)
         filename = Prompt.ask(
-            "[bold]Enter filename[/bold]",
-            default=f"impact_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            "[bold]Filename[/bold] [dim](Enter for exports folder)[/dim]",
+            default=default_name
         )
 
         try:
-            export_data = {
-                'paper_title': result['paper_title'],
-                'total_citations': result['total_citations'],
-                'analyzed_citations': result['analyzed_citations'],
-                'analysis_date': datetime.now().isoformat(),
-                'yearly_stats': result.get('yearly_stats', []),
-                # Grant-friendly impact statistics
-                'impact_stats': result.get('impact_stats', {}),
-                'high_profile_scholars': [
-                    {
-                        'name': (s.get('name') if isinstance(s, dict) else getattr(s, 'name', 'Unknown')),
-                        'h_index': (s.get('h_index') if isinstance(s, dict) else getattr(s, 'h_index', None)),
-                        'affiliation': (s.get('affiliation') if isinstance(s, dict) else getattr(s, 'affiliation', 'Unknown')),
-                        'institution_type': (s.get('institution_type') if isinstance(s, dict) else getattr(s, 'institution_type', 'Unknown')),
-                        'google_scholar_id': (s.get('google_scholar_id') if isinstance(s, dict) else ''),
-                        'semantic_scholar_id': (s.get('semantic_scholar_id') if isinstance(s, dict) else ''),
-                        'citing_paper': (s.get('citing_paper') if isinstance(s, dict) else '')
-                    }
-                    for s in result.get('high_profile_scholars', [])
-                ],
-                'institutions': result.get('institutions', {}),
-                'venues': {
-                    'total': result.get('venues', {}).get('total', 0),
-                    'unique': result.get('venues', {}).get('unique', 0),
-                    'top_tier_percentage': result.get('venues', {}).get('top_tier_percentage', 0),
-                    'most_common': result.get('venues', {}).get('most_common', [])
-                },
-                'influential_citations': [
-                    self._serialize_citation(c)
-                    for c in result.get('influential_citations', [])
-                ],
-                'methodological_citations': [
-                    self._serialize_citation(c)
-                    for c in result.get('methodological_citations', [])
-                ]
-            }
-
-            with open(filename, 'w') as f:
-                json.dump(export_data, f, indent=2)
-
-            self.console.print(f"[success]✓ Report saved to {filename}[/success]")
-
+            # Bare default name → write to the configured exports directory
+            path = export_report(result, fmt, None if filename == default_name else filename)
+            self.console.print(f"[success]✓ Report saved to {os.path.abspath(path)}[/success]")
         except Exception as e:
             self.console.print(f"[error]Error saving report: {str(e)}[/error]")
+
+        # Pause so the message isn't wiped by the results screen redraw
+        Prompt.ask("\nPress Enter to continue")
 

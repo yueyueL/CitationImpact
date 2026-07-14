@@ -30,6 +30,10 @@ I built CitationImpact to answer these questions automatically. Instead of manua
 CitationImpact analyzes your research citations and generates **grant-ready impact statements**:
 
 - 📋 **Grant Impact Summary** – Copy-ready statements for proposals & tenure files
+- 🆔 **ID-first author matching** – Unique Semantic Scholar/Google Scholar IDs with publication-verified fallbacks; every author is marked ✓ ID-matched, ≈ verified, or ? name-only so you can trust the numbers
+- 🌍 **Field-normalized impact** – FWCI & citation percentile from OpenAlex ("cited 4.2× the world average for its field")
+- 🙋 **Self-citation detection** – Reports what % of citations are independent of the original authors
+- 💬 **How your work is used** – Citation intent breakdown (methodology/background/result) with in-text quotes
 - 🏆 **Highly-Cited Papers** – Papers with 100+ citations that cite YOUR work
 - 👥 **High-profile scholars** – Prominent researchers (by h-index & total citations) citing your work  
 - 🏛️ **Institution breakdown** – Universities (with QS/US News rankings), Industry, Government
@@ -37,6 +41,7 @@ CitationImpact analyzes your research citations and generates **grant-ready impa
 - 📈 **Citation velocity** – Track your impact over time with timeline visualization
 - 🔗 **Clickable links** – Every author and paper is linked to their profile
 - 💾 **Smart caching** – Never wait twice for the same analysis (user-controlled refresh)
+- 📤 **Grant-ready exports** – Markdown, LaTeX, CSV, BibTeX, JSON (interactive or via CLI)
 
 ---
 
@@ -55,6 +60,14 @@ pip install -r requirements.txt
 ```
 
 That's it! The interactive menu will guide you through the rest.
+
+Prefer scripting? There's a non-interactive mode too:
+
+```bash
+./citation-impact analyze "Your Paper Title" --format markdown -o report.md
+./citation-impact analyze "Your Paper Title" --format latex -o -   # print to stdout
+./citation-impact cache list
+```
 
 <p align="center">
   <img src="assets/Screenshot1-start.png" alt="Main Menu" width="700"/>
@@ -91,9 +104,9 @@ That's it! The interactive menu will guide you through the rest.
 Want to analyze papers by someone else?
 
 1. Select **"3. 👤 Browse Other Authors"**
-2. Enter their **Semantic Scholar ID** or **Google Scholar ID**
-3. Pick a paper from the list
-4. Analyze it with one click
+2. Enter their **Semantic Scholar ID** or **Google Scholar ID** (most accurate), or just their name
+3. If several researchers share that name, pick the right one from the candidate list (shown with affiliation, h-index, and paper count)
+4. Pick a paper from the list and analyze it with one click
 
 **Pro tip:** Save your own author ID in Settings so "My Papers" works instantly!
 
@@ -198,6 +211,34 @@ Example output:
 - Explore citation contexts
 - **Adaptive tables** – automatically fit your terminal width
 
+### 💾 Export Formats
+Press `e` on any results screen (or use `--format` on the CLI) to export:
+
+| Format | Best for |
+|--------|----------|
+| **HTML** (`.html`) | Shareable one-file report: charts, **world map** of citing countries, citation tree — works offline, light/dark |
+| **Markdown** (`.md`) | Pasting into docs, GitHub, Notion |
+| **LaTeX** (`.tex`) | Grant appendices – drop straight into your proposal |
+| **CSV** (`.csv`) | All citing papers, one row each, for spreadsheets |
+| **CSV bundle** (`bundle`) | Complete data dump: papers, authors, venues, timeline as separate CSVs |
+| **BibTeX** (`.bib`) | Reference managers (Zotero, JabRef) |
+| **Tree** (`.txt`) | Plain-text citation tree grouped by year |
+| **JSON** (`.json`) | Further scripting and analysis |
+
+Reports are written to `.citationimpact/exports/` by default.
+
+### 🌳 Citation Tree
+Menu option **8** shows every citing paper as an expandable tree — group by
+**year**, **venue**, or **institution type** with one keypress, every title
+clickable.
+
+### 🛡️ Data-Quality Guarantees
+- If API requests fail mid-analysis (rate limits, network), the report says so
+  with a visible **"data may be incomplete"** banner — in the terminal, HTML,
+  Markdown, and LaTeX outputs — and the incomplete result is **not cached**.
+- Citation counts from different sources (Semantic Scholar vs OpenAlex) are
+  reconciled and flagged when they disagree by more than 10%.
+
 ---
 
 ## Configuration
@@ -246,12 +287,38 @@ Cache is stored in `.citationimpact/` in your project folder. You can view stati
 
 ---
 
+## Command-Line Mode (Scripting)
+
+Everything works without the interactive menu — great for scripts and cron jobs:
+
+```bash
+# Analyze a paper and write a grant-ready Markdown report
+./citation-impact analyze "Your Paper Title" --format markdown -o report.md
+
+# LaTeX section for a grant appendix, printed to stdout
+./citation-impact analyze "Your Paper Title" --format latex -o -
+
+# CSV of every citing paper / BibTeX of every citing paper
+./citation-impact analyze "Your Paper Title" -f csv -o citations.csv
+./citation-impact analyze "Your Paper Title" -f bibtex -o citations.bib
+
+# Override settings per run
+./citation-impact analyze "Your Paper Title" --max-citations 200 --data-source api --no-cache
+
+# Cache management
+./citation-impact cache list
+./citation-impact cache clear --days 30
+```
+
+Running `./citation-impact` with no arguments opens the interactive menu as always.
+
 ## Python API
 
-If you prefer scripting:
+If you prefer Python:
 
 ```python
 from citationimpact import analyze_paper_impact
+from citationimpact.export import export_report
 
 result = analyze_paper_impact(
     paper_title="Your Paper Title",
@@ -266,6 +333,10 @@ print(f"Top-tier venues: {result['venues']['top_tier_percentage']:.1f}%")
 
 for scholar in result['high_profile_scholars'][:5]:
     print(f"- {scholar['name']} (h={scholar['h_index']}) - {scholar['affiliation']}")
+
+# Export in any format: markdown, latex, csv, bibtex, json
+path = export_report(result, 'markdown')
+print(f"Report saved to {path}")
 ```
 
 ---
@@ -423,6 +494,8 @@ CitationImpact/
 │   │   └── _index.json         # Publication-based author matching index
 │   └── publications_cache/     # My Papers list (permanent until refresh)
 ├── citationimpact/             # Source code
+│   ├── cli.py                  # Non-interactive command-line interface
+│   ├── export.py               # Report exporters (Markdown/LaTeX/CSV/BibTeX/JSON)
 │   ├── core/                   # Analysis engine
 │   ├── clients/                # API clients
 │   │   ├── unified.py          # Semantic Scholar + OpenAlex
@@ -440,7 +513,21 @@ CitationImpact/
 ├── data/                       # Ranking datasets
 │   ├── university_rankings/    # QS, US News data
 │   └── venues_rankings/        # CORE, CCF, iCORE data
+├── tests/                      # Pytest suite (run: python -m pytest)
 ```
+
+---
+
+## Development
+
+```bash
+pip install -r requirements.txt pytest
+
+# Run the test suite (plugin autoload disabled to avoid system plugin conflicts)
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest
+```
+
+Tests run automatically on GitHub Actions (Python 3.9–3.12) for every push and PR.
 
 ---
 
@@ -544,8 +631,9 @@ Found a bug? Have an idea? Open an issue or PR!
 
 **Areas for contribution:**
 - Additional ranking sources (THE, ARWU, etc.)
-- Export formats (PDF, LaTeX, CSV)
+- More export formats (PDF, DOCX)
 - Web interface
+- Whole-career portfolio analysis (all papers at once)
 - Better citation context analysis
 
 ---

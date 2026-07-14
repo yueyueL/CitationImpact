@@ -130,6 +130,8 @@ def is_government_institution(affiliation: str, institution_type: str = None) ->
     Returns:
         True if government institution
     """
+    import re
+
     if not affiliation or affiliation == 'Unknown':
         return False
 
@@ -140,9 +142,18 @@ def is_government_institution(affiliation: str, institution_type: str = None) ->
         return True
 
     # Check against known government institutions
+    # Use word boundaries for single-word keywords/acronyms to avoid false
+    # positives (e.g., "epa" in "department", "cas" in "Newcastle")
     for gov_keyword in KNOWN_GOVERNMENT_INSTITUTIONS:
-        if gov_keyword in affiliation_lower:
-            return True
+        if ' ' in gov_keyword:
+            # For multi-word keywords, do simple substring match
+            if gov_keyword in affiliation_lower:
+                return True
+        else:
+            # For single-word keywords/acronyms, use word boundary
+            pattern = r'\b' + re.escape(gov_keyword) + r'\b'
+            if re.search(pattern, affiliation_lower):
+                return True
 
     return False
 
@@ -168,6 +179,10 @@ def is_industry_institution(affiliation: str, institution_type: str = None) -> b
     if institution_type and institution_type.lower() == 'company':
         return True
 
+    # An explicit 'education' type should not be overridden by name heuristics
+    if institution_type and institution_type.lower() == 'education':
+        return False
+
     # Check against known industry institutions
     # Use word boundaries to avoid false positives (e.g., "Stanford" shouldn't match "ford")
     for company_keyword in KNOWN_INDUSTRY_INSTITUTIONS:
@@ -182,7 +197,9 @@ def is_industry_institution(affiliation: str, institution_type: str = None) -> b
                 return True
 
     # Check for common company indicators
-    if any(indicator in affiliation_lower for indicator in ['inc.', 'inc', 'corp', 'ltd', 'llc', 'gmbh']):
+    # Use word boundaries to avoid false positives (e.g., "inc" in "Princeton"
+    # or "Cincinnati", "corp" in "Corpus Christi")
+    if re.search(r'\b(inc|incorporated|corp|corporation|ltd|llc|gmbh)\b', affiliation_lower):
         return True
 
     return False

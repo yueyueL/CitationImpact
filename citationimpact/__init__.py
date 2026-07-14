@@ -42,7 +42,7 @@ from .cache import ResultCache, get_result_cache, AuthorProfileCache, get_author
 # Config
 from .config import ConfigManager, get_config_manager
 
-__version__ = '1.2.0'
+__version__ = '1.4.0'
 __all__ = [
     # Main API
     'analyze_paper_impact',

@@ -9,6 +9,34 @@ from rich import box
 from .prompts import get_adaptive_widths, make_author_clickable, make_paper_clickable
 
 
+# Compact markers for Author.match_confidence values (author disambiguation).
+# 'id'       resolved via a unique identifier (definitely the right person)
+# 'verified' name search corroborated by publication evidence
+# 'name'     name-only search result (may be a different same-named person)
+# ''         unknown (legacy/cached data) — treated as name-only by the UI
+_CONFIDENCE_MARKERS = {
+    'id': '[green]✓[/green]',
+    'verified': '[cyan]≈[/cyan]',
+    'name': '[yellow]?[/yellow]',
+    '': '[dim]·[/dim]',
+}
+
+CONFIDENCE_LEGEND = (
+    "[green]✓[/green] ID-matched  [cyan]≈[/cyan] verified by publication  "
+    "[yellow]?[/yellow] name-only match (may be a different person with the same name)"
+)
+
+
+def confidence_marker(match_confidence: Any) -> str:
+    """
+    Return a compact rich-markup marker for an author's match_confidence.
+
+    Unknown/missing values fall back to the dim '·' (legacy data) marker.
+    """
+    key = str(match_confidence or '').strip().lower()
+    return _CONFIDENCE_MARKERS.get(key, _CONFIDENCE_MARKERS[''])
+
+
 def create_overview_table(result: Dict[str, Any]) -> Table:
     """
     Create the overview metrics table.

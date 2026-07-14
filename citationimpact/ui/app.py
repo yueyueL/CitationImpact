@@ -20,6 +20,20 @@ from .analysis_view import AnalysisView
 from .components.prompts import looks_like_author_id
 
 
+def _display_value(*values, default: str = 'N/A') -> str:
+    """
+    Return the first non-None value as a string, else the default.
+
+    dict.get() returns None (not the fallback) for present-but-null keys
+    (e.g. Semantic Scholar's "year": null), so chained .get() defaults
+    would render the literal string 'None' in tables.
+    """
+    for value in values:
+        if value is not None:
+            return str(value)
+    return default
+
+
 class TerminalUI:
     """Interactive terminal UI for CitationImpact analysis."""
     
@@ -43,19 +57,36 @@ class TerminalUI:
         
         # Initialize sub-modules
         self.settings_manager = SettingsManager(self.console, self.config_manager, self.config)
-        self.analysis_view = AnalysisView(self.console)
-        
+        self.analysis_view = AnalysisView(self.console, self.config)
+
         # Shared API client (browser stays open for entire session!)
         self._shared_client = None
-    
+        # Data source the shared client was created for (so a mid-session
+        # data_source change doesn't silently reuse a client of the wrong type)
+        self._shared_client_source = None
+
     def _cleanup(self):
         """Clean up resources (close browser) before exit."""
         if self._shared_client and hasattr(self._shared_client, 'close'):
             try:
                 self._shared_client.close()
-                self._shared_client = None
             except Exception:
                 pass
+        self._shared_client = None
+        self._shared_client_source = None
+
+    def _get_reusable_client(self):
+        """
+        Return the shared client if it matches the current data source.
+
+        If the user changed data_source in Settings since the client was
+        created, close and discard the stale client so the analyzer builds
+        a fresh one of the right type.
+        """
+        if (self._shared_client is not None
+                and self._shared_client_source != self.config.get('data_source')):
+            self._cleanup()
+        return self._shared_client
 
     def clear_screen(self):
         """Clear the terminal screen."""
@@ -174,12 +205,26 @@ class TerminalUI:
                 # Prefer Google Scholar for comprehensive data
                 if gs_id:
                     from citationimpact.clients.google_scholar import get_google_scholar_client
-                    client = get_google_scholar_client(
-                        use_selenium=True,
-                        headless=False,
-                        scraper_api_key=self.config.get('scraper_api_key')
+                    # Reuse the shared client when it is already a Google
+                    # Scholar client; otherwise create a temporary one and
+                    # close it once the fetch is done (don't leak it)
+                    client = (
+                        self._shared_client
+                        if self._shared_client_source == 'google_scholar'
+                        else None
                     )
-                    publications = client.get_author_publications(gs_id, limit=50)
+                    local_client = None
+                    if client is None:
+                        client = local_client = get_google_scholar_client(
+                            use_selenium=True,
+                            headless=False,
+                            scraper_api_key=self.config.get('scraper_api_key')
+                        )
+                    try:
+                        publications = client.get_author_publications(gs_id, limit=50)
+                    finally:
+                        if local_client is not None:
+                            local_client.close()
                     # Get author info for cache
                     author_info = {'scholar_id': gs_id}
                 elif s2_id:
@@ -243,19 +288,27 @@ class TerminalUI:
                 bib = pub.get('bib', {})
                 full_title = bib.get('title', pub.get('title', 'Unknown'))
                 title = full_title[:48]
-                year = str(bib.get('pub_year', pub.get('year', 'N/A')))
-                citations = str(pub.get('num_citations', pub.get('citations', pub.get('citationCount', 'N/A'))))
+                year = _display_value(bib.get('pub_year'), pub.get('year'))
+                citations = _display_value(pub.get('num_citations'), pub.get('citations'), pub.get('citationCount'))
                 venue_raw = bib.get('citation', pub.get('venue', ''))
                 venue = venue_raw[:25] if venue_raw else 'N/A'
             else:
                 full_title = getattr(pub, 'title', 'Unknown')
                 title = full_title[:48]
-                year = str(getattr(pub, 'year', 'N/A'))
-                citations = str(getattr(pub, 'citationCount', 'N/A'))
+                year = _display_value(getattr(pub, 'year', None))
+                citations = _display_value(getattr(pub, 'citationCount', None))
                 venue = (getattr(pub, 'venue', 'N/A') or 'N/A')[:25]
-            
-            # Check if this paper has cached analysis results
-            is_analyzed = result_cache.has_cached_result(full_title)
+
+            # Check if this paper has cached analysis results (using the
+            # user's actual settings, not hardcoded defaults)
+            is_analyzed = result_cache.has_cached_result(
+                full_title,
+                params={
+                    'h_index_threshold': self.config['h_index_threshold'],
+                    'max_citations': self.config['max_citations'],
+                    'data_source': self.config['data_source'],
+                }
+            )
             status_icon = "[green]✓[/green]" if is_analyzed else "[dim]○[/dim]"
             if is_analyzed:
                 analyzed_count += 1
@@ -363,12 +416,13 @@ class TerminalUI:
                     # Pass GS cites_id for DIRECT citation access (no search!)
                     gs_cites_id=cites_id,
                     # Reuse existing client (browser stays open!)
-                    existing_client=self._shared_client
+                    existing_client=self._get_reusable_client()
                 )
-                
+
                 # Store client for reuse (browser stays open for session)
                 if result.get('_client'):
                     self._shared_client = result.pop('_client')
+                    self._shared_client_source = self.config['data_source']
                 
                 progress.remove_task(task)
             
@@ -430,12 +484,13 @@ class TerminalUI:
                     email=self.config['email'],
                     semantic_scholar_key=self.config['api_key'],
                     scraper_api_key=self.config.get('scraper_api_key'),
-                    existing_client=self._shared_client  # Reuse browser session
+                    existing_client=self._get_reusable_client()  # Reuse browser session
                 )
-                
+
                 # Store client for reuse
                 if result.get('_client'):
                     self._shared_client = result.pop('_client')
+                    self._shared_client_source = self.config['data_source']
 
                 progress.remove_task(task)
 
@@ -489,6 +544,13 @@ class TerminalUI:
 
         is_author_id = looks_like_author_id(author_input, data_source)
 
+        # Name entered in API mode → disambiguate same-named authors up front
+        # so we fetch the RIGHT person's publications by unique ID, not the
+        # first name-search hit (which may be a different same-named author)
+        selected_author_id = None
+        if not is_author_id and data_source != 'google_scholar':
+            selected_author_id = self._select_author_candidate(author_input)
+
         self.console.print(f"\n[info]Fetching papers for {'ID' if is_author_id else 'author'}: {author_input}...[/info]")
 
         try:
@@ -501,11 +563,18 @@ class TerminalUI:
 
                 if data_source == 'google_scholar':
                     from citationimpact.clients.google_scholar import get_google_scholar_client
-                    client = get_google_scholar_client(
-                        use_selenium=True,
-                        headless=False,
-                        scraper_api_key=self.config.get('scraper_api_key')
-                    )
+                    # Reuse the shared browser session when possible; otherwise
+                    # create one and retain it so the follow-up analysis reuses
+                    # the same browser instead of launching a second one
+                    client = self._get_reusable_client()
+                    if client is None:
+                        client = get_google_scholar_client(
+                            use_selenium=True,
+                            headless=False,
+                            scraper_api_key=self.config.get('scraper_api_key')
+                        )
+                        self._shared_client = client
+                        self._shared_client_source = data_source
 
                     if is_author_id:
                         publications = client.get_author_publications(author_input, limit=50)
@@ -528,10 +597,15 @@ class TerminalUI:
 
                     if is_author_id:
                         publications = client.get_author_publications(author_input, limit=50)
+                    elif selected_author_id:
+                        # Unique ID chosen via the candidate picker above
+                        publications = client.get_author_publications(selected_author_id, limit=50)
                     else:
-                        author_info = client.get_author(author_input)
-                        if author_info and hasattr(author_info, 'semantic_scholar_id') and author_info.semantic_scholar_id:
-                            publications = client.get_author_publications(author_info.semantic_scholar_id, limit=50)
+                        # Resolve the name to a Semantic Scholar author ID
+                        # (get_author() never populates semantic_scholar_id)
+                        resolved_id = client.search_author(author_input)
+                        if resolved_id:
+                            publications = client.get_author_publications(resolved_id, limit=50)
                         else:
                             publications = []
 
@@ -548,6 +622,76 @@ class TerminalUI:
         except Exception as e:
             self.console.print(f"\n[error]Error fetching publications: {str(e)}[/error]")
             Prompt.ask("\nPress Enter to continue")
+
+    def _select_author_candidate(self, author_name: str):
+        """
+        Disambiguate same-named authors before fetching publications.
+
+        Searches Semantic Scholar for author candidates matching the name.
+        If several candidates exist, shows a small picker table (affiliation,
+        h-index, paper count) so the user selects the right person; a single
+        candidate is used directly. Returns the chosen S2 author ID, or None
+        (no candidates / client without candidate search / lookup error) so
+        the caller falls back to the legacy name-search behavior.
+        """
+        from citationimpact.clients import get_api_client
+
+        try:
+            client = get_api_client(
+                email=self.config.get('email'),
+                semantic_scholar_key=self.config.get('api_key')
+            )
+            search_candidates = getattr(client, 'search_author_candidates', None)
+            if not callable(search_candidates):
+                return None
+            candidates = search_candidates(author_name, limit=5) or []
+        except Exception:
+            return None
+
+        candidates = [c for c in candidates if c.get('author_id')]
+        if not candidates:
+            return None
+        if len(candidates) == 1:
+            return candidates[0]['author_id']
+
+        from rich.table import Table
+        from rich.markup import escape
+        from rich import box
+
+        self.console.print(
+            f"\n[info]Found {len(candidates)} authors matching "
+            f"'{escape(author_name)}'. Select the right person:[/info]"
+        )
+
+        table = Table(box=box.ROUNDED, header_style="bold cyan")
+        table.add_column("#", style="bold magenta", width=4)
+        table.add_column("Name", style="bold", max_width=30)
+        table.add_column("Affiliation", style="cyan", max_width=40)
+        table.add_column("H-Index", justify="right", style="yellow", width=8)
+        table.add_column("Papers", justify="right", style="green", width=8)
+
+        for idx, cand in enumerate(candidates, 1):
+            # API-supplied strings may contain [bracketed] tokens that Rich
+            # would parse as markup (dropped text or MarkupError on print)
+            table.add_row(
+                str(idx),
+                escape(cand.get('name') or 'Unknown'),
+                escape(cand.get('affiliation') or 'Unknown'),
+                str(cand.get('h_index', 0) or 0),
+                str(cand.get('paper_count', 0) or 0),
+            )
+
+        self.console.print(table)
+
+        choice = Prompt.ask(
+            "[bold]Select author[/bold]",
+            choices=[str(i) for i in range(1, len(candidates) + 1)],
+            default="1"
+        )
+        try:
+            return candidates[int(choice) - 1]['author_id']
+        except (ValueError, IndexError):
+            return candidates[0]['author_id']
 
     def _display_publications(self, publications: list, author_name: str):
         """Display author publications and allow selection."""
@@ -570,13 +714,13 @@ class TerminalUI:
         for idx, pub in enumerate(publications[:20], 1):
             if isinstance(pub, dict):
                 title = pub.get('title', 'Unknown')[:50]
-                year = str(pub.get('year', 'N/A'))
-                citations = str(pub.get('citations', pub.get('citationCount', 'N/A')))
+                year = _display_value(pub.get('year'))
+                citations = _display_value(pub.get('citations'), pub.get('citationCount'))
                 venue = pub.get('venue', 'N/A')[:25] if pub.get('venue') else 'N/A'
             else:
                 title = getattr(pub, 'title', 'Unknown')[:50]
-                year = str(getattr(pub, 'year', 'N/A'))
-                citations = str(getattr(pub, 'citationCount', 'N/A'))
+                year = _display_value(getattr(pub, 'year', None))
+                citations = _display_value(getattr(pub, 'citationCount', None))
                 venue = (getattr(pub, 'venue', 'N/A') or 'N/A')[:25]
 
             table.add_row(str(idx), title, year, citations, venue)
@@ -635,12 +779,13 @@ class TerminalUI:
                     email=self.config['email'],
                     semantic_scholar_key=self.config['api_key'],
                     scraper_api_key=self.config.get('scraper_api_key'),
-                    existing_client=self._shared_client  # Reuse browser session
+                    existing_client=self._get_reusable_client()  # Reuse browser session
                 )
-                
+
                 # Store client for reuse
                 if result.get('_client'):
                     self._shared_client = result.pop('_client')
+                    self._shared_client_source = self.config['data_source']
 
                 progress.remove_task(task)
 
@@ -709,38 +854,44 @@ class TerminalUI:
         """Main application loop."""
         try:
             while True:
-                self.clear_screen()
-                self.show_header()
-
-                choice = self.show_main_menu()
-
-                if choice == "1":
-                    self.my_papers()  # NEW: Direct profile-based access
-                elif choice == "2":
-                    self.analyze_paper()  # Search any paper
-                elif choice == "3":
-                    self.browse_author_papers()  # Other authors
-                elif choice == "4":
-                    self.manage_settings()
-                elif choice == "5":
-                    self.show_help()
-                elif choice == "6":
+                try:
                     self.clear_screen()
-                    self.console.print("\n[success]Thank you for using Citation Impact Analyzer![/success]")
-                    self.console.print("[dim]Good luck with your research! 🎓[/dim]\n")
-                    self._cleanup()  # Close browser before exit
-                    sys.exit(0)
+                    self.show_header()
 
-        except KeyboardInterrupt:
+                    choice = self.show_main_menu()
+
+                    if choice == "1":
+                        self.my_papers()  # NEW: Direct profile-based access
+                    elif choice == "2":
+                        self.analyze_paper()  # Search any paper
+                    elif choice == "3":
+                        self.browse_author_papers()  # Other authors
+                    elif choice == "4":
+                        self.manage_settings()
+                    elif choice == "5":
+                        self.show_help()
+                    elif choice == "6":
+                        self.clear_screen()
+                        self.console.print("\n[success]Thank you for using Citation Impact Analyzer![/success]")
+                        self.console.print("[dim]Good luck with your research! 🎓[/dim]\n")
+                        self._cleanup()  # Close browser before exit
+                        sys.exit(0)
+                except EOFError:
+                    raise
+                except Exception as e:
+                    # Don't kill the whole session (and the open browser) on
+                    # an unexpected error - show the traceback and go back to
+                    # the main menu
+                    self.console.print(f"\n[error]Unexpected error: {str(e)}[/error]")
+                    self.console.print_exception()
+                    Prompt.ask("\nPress Enter to return to the main menu")
+
+        except (KeyboardInterrupt, EOFError):
             self.clear_screen()
             self.console.print("\n[warning]Application interrupted by user.[/warning]")
             self.console.print("[dim]Goodbye! 👋[/dim]\n")
             self._cleanup()  # Close browser before exit
             sys.exit(0)
-        except Exception as e:
-            self.console.print(f"\n[error]Unexpected error: {str(e)}[/error]")
-            self._cleanup()  # Close browser before exit
-            sys.exit(1)
 
 
 def main():

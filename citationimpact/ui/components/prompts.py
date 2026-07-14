@@ -1,6 +1,7 @@
 """
 Helper functions for UI prompts and formatting.
 """
+import re
 from typing import Any, Dict, List, Optional
 
 
@@ -195,9 +196,15 @@ def looks_like_author_id(text: str, data_source: str) -> bool:
         return False
 
     if data_source == 'google_scholar':
-        # Google Scholar IDs are alphanumeric, typically 12 characters
-        if len(text) >= 10 and any(c.isalpha() for c in text) and any(c.isdigit() for c in text):
-            return True
+        # Google Scholar IDs are exactly 12 base64-like characters
+        # (letters, digits, '-' or '_') and may contain no digits at all
+        # (e.g. 'JicYPdAAAAAJ'). A bare 12-letter surname ('Ramachandran')
+        # matches that charset too, so also require an ID-only signal:
+        # a digit/'_'/'-', or the near-universal 'AAAJ' suffix of real
+        # profile IDs (which covers the digit-less ones)
+        if re.fullmatch(r'[A-Za-z0-9_-]{12}', text):
+            if re.search(r'[0-9_-]', text) or text.endswith('AAAJ'):
+                return True
     else:
         # Semantic Scholar IDs are typically numeric
         if text.isdigit():

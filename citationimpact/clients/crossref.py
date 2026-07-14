@@ -171,7 +171,9 @@ class CrossrefClient:
             params = {
                 'query.author': author_name,
                 'rows': limit,
-                'select': 'DOI,title,author,container-title,published-print,is-referenced-by-count'
+                'select': ('DOI,title,author,container-title,published-print,'
+                           'published-online,created,is-referenced-by-count,'
+                           'reference-count,type')
             }
             
             response = self.session.get(url, params=params, timeout=self.timeout)

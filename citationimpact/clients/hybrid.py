@@ -1,4 +1,3 @@
-1
 """
 Hybrid API Client - Combines Semantic Scholar and Google Scholar for comprehensive analysis
 
@@ -15,6 +14,7 @@ Benefits:
 - Higher h-indices from GS user profiles
 """
 
+import copy
 import time
 import hashlib
 from typing import Dict, List, Optional, Set, Tuple
@@ -80,6 +80,51 @@ def _extract_last_name(name: str) -> str:
         return ""
     parts = name.strip().split()
     return parts[-1] if parts else ""
+
+
+# Match-confidence levels, weakest to strongest ('' < 'name' < 'verified' < 'id')
+_CONFIDENCE_ORDER = ('', 'name', 'verified', 'id')
+
+
+def _confidence_rank(level: str) -> int:
+    """Rank a match_confidence level ('' < 'name' < 'verified' < 'id')"""
+    try:
+        return _CONFIDENCE_ORDER.index(level or '')
+    except ValueError:
+        return 0
+
+
+def _highest_confidence(*levels: str) -> str:
+    """Return the strongest confidence level among the given values"""
+    best = ''
+    for level in levels:
+        if _confidence_rank(level) > _confidence_rank(best):
+            best = level
+    return best
+
+
+def _apply_confidence(author: Optional[Author], confidence: str, override: bool = False) -> Optional[Author]:
+    """
+    Stamp match_confidence on an Author.
+
+    By default keeps the HIGHEST of the existing and new levels
+    ('id' > 'verified' > 'name' > ''). With override=True the new level is
+    set unconditionally (used when a name-derived association caps the
+    confidence of an ID-fetched profile).
+
+    Uses getattr/setattr defensively so Author objects created before the
+    match_confidence field existed (e.g. old cache entries) still work.
+    """
+    if author is None:
+        return None
+    current = getattr(author, 'match_confidence', '') or ''
+    final = confidence if override else _highest_confidence(current, confidence)
+    if final != current:
+        try:
+            setattr(author, 'match_confidence', final)
+        except Exception:
+            pass
+    return author
 
 
 class HybridAPIClient:
@@ -153,7 +198,8 @@ class HybridAPIClient:
         self._author_cache: Dict[str, Author] = {}  # author_id/name -> Author
         self._venue_cache: Dict[str, Venue] = {}  # venue_name -> Venue
         self._paper_id_to_title: Dict[str, str] = {}  # S2 paper ID -> title (for GS lookup)
-        
+        self._paper_id_to_cites_id: Dict[str, List[str]] = {}  # paper ID -> GS cites_id (per paper)
+
         # Track sources for transparency
         self.last_sources_used: Dict[str, str] = {}
     
@@ -199,6 +245,17 @@ class HybridAPIClient:
                     gs_citations = gs_paper.get('citationCount', 0)
                     print(f"[Hybrid] GS found paper with {gs_citations} citations")
                     self.last_sources_used['paper_search'].append('google_scholar')
+                    # Record title mapping and cites_id so get_citations works for GS-only papers
+                    gs_paper_id = gs_paper.get('paperId', '')
+                    if gs_paper_id:
+                        self._paper_id_to_title[gs_paper_id] = gs_paper.get('title', title)
+                        if gs_paper.get('cites_id'):
+                            # Record PER PAPER - never mutate the client-level
+                            # gs_cites_id (the client is reused across analyses,
+                            # a stale id would merge another paper's citers)
+                            cites_id = gs_paper['cites_id']
+                            self._paper_id_to_cites_id[gs_paper_id] = (
+                                cites_id if isinstance(cites_id, list) else [cites_id])
                     return gs_paper
             except Exception as e:
                 print(f"[Hybrid] Google Scholar search failed: {e}")
@@ -223,27 +280,35 @@ class HybridAPIClient:
         
         all_citations: List[Citation] = []
         seen_titles: Set[str] = set()
-        
-        # Check if we have direct GS citation access (from My Papers)
-        has_direct_gs_access = self.gs_cites_id and len(self.gs_cites_id) > 0
+
+        # GS-synthesized IDs (gs_*) are not valid S2 paper IDs - skip the S2 call for them
+        is_gs_paper_id = paper_id.startswith('gs_')
+
+        # Check if we have direct GS citation access: the cites_id recorded for
+        # THIS paper by search_paper, or the constructor-provided list (My Papers)
+        direct_cites_id = self._paper_id_to_cites_id.get(paper_id) or self.gs_cites_id
+        has_direct_gs_access = bool(direct_cites_id and len(direct_cites_id) > 0)
         if has_direct_gs_access:
-            print(f"[Hybrid] ✓ Have direct GS citation IDs: {self.gs_cites_id[:2]}...")
-        
+            print(f"[Hybrid] ✓ Have direct GS citation IDs: {direct_cites_id[:2]}...")
+
         # Get Semantic Scholar citations (primary - has author IDs and influential flags)
-        try:
-            s2_citations = self.s2_client.get_citations(paper_id, limit=limit)
-            
-            if s2_citations:
-                print(f"[Hybrid] Got {len(s2_citations)} citations from Semantic Scholar")
-                self.last_sources_used['citations'].append(f'semantic_scholar:{len(s2_citations)}')
-                
-                for citation in s2_citations:
-                    all_citations.append(citation)
-                    seen_titles.add(_normalize_title(citation.citing_paper_title))
-            else:
-                print(f"[Hybrid] S2 returned 0 citations")
-        except Exception as e:
-            print(f"[Hybrid] ⚠️ S2 citations failed: {str(e)[:50]}")
+        if is_gs_paper_id:
+            print(f"[Hybrid] Paper only found on Google Scholar, skipping S2 citations")
+        else:
+            try:
+                s2_citations = self.s2_client.get_citations(paper_id, limit=limit)
+
+                if s2_citations:
+                    print(f"[Hybrid] Got {len(s2_citations)} citations from Semantic Scholar")
+                    self.last_sources_used['citations'].append(f'semantic_scholar:{len(s2_citations)}')
+
+                    for citation in s2_citations:
+                        all_citations.append(citation)
+                        seen_titles.add(_normalize_title(citation.citing_paper_title))
+                else:
+                    print(f"[Hybrid] S2 returned 0 citations")
+            except Exception as e:
+                print(f"[Hybrid] ⚠️ S2 citations failed: {str(e)[:50]}")
         
         # Get Google Scholar citations
         # Priority: Direct access via cites_id > Search by title (may trigger CAPTCHA)
@@ -257,8 +322,11 @@ class HybridAPIClient:
                     # DIRECT ACCESS - use cites_id URL (no search = no CAPTCHA!)
                     print(f"[Hybrid] Using DIRECT GS citation access (no search needed)...")
                     gs_citations = self.gs_client.get_citations_by_cites_id(
-                        self.gs_cites_id, limit=limit
+                        direct_cites_id, limit=limit
                     )
+                elif is_gs_paper_id:
+                    # GS paper is cached in the GS client under this ID - fetch directly
+                    gs_citations = self.gs_client.get_citations(paper_id, limit=limit)
                 else:
                     # Fallback: Search by paper title (may trigger CAPTCHA)
                     paper_title = self._paper_id_to_title.get(paper_id, '')
@@ -375,14 +443,18 @@ class HybridAPIClient:
                                     citing_authors=citation.citing_authors,
                                     venue=detailed.get('venue', '') or citation.venue or 'Unknown',
                                     year=detailed.get('year', 0) or citation.year or 0,
-                                    is_influential=citation.is_influential or detailed.get('influentialCitationCount', 0) > 5,
+                                    # Keep the per-edge influence flag only; the citing paper's own
+                                    # influentialCitationCount says nothing about THIS citation edge
+                                    is_influential=citation.is_influential,
                                     contexts=citation.contexts,
                                     intents=citation.intents,
                                     paper_id=s2_paper_id,
                                     doi=doi or citation.doi,
                                     url=f"https://www.semanticscholar.org/paper/{s2_paper_id}" if s2_paper_id else citation.url,
                                     # IMPORTANT: Merge author info - keep GS IDs if available
-                                    authors_with_ids=self._merge_author_ids(citation.authors_with_ids, authors_with_ids),
+                                    authors_with_ids=self._merge_author_ids(
+                                        citation.authors_with_ids, authors_with_ids,
+                                        paper_title=citation.citing_paper_title),
                                     citation_count=detailed.get('citationCount', 0) or citation.citation_count,
                                     influential_citation_count=detailed.get('influentialCitationCount', 0) or citation.influential_citation_count
                                 )
@@ -396,21 +468,31 @@ class HybridAPIClient:
                     cr_paper = crossref_client.search_paper(citation.citing_paper_title)
                     
                     if cr_paper and _titles_match(cr_paper.get('title', ''), citation.citing_paper_title):
-                        # Fill in missing data
-                        if not enhanced_citation.doi and cr_paper.get('doi'):
+                        # Fill in each missing field independently (DOI, venue, year)
+                        new_doi = enhanced_citation.doi or cr_paper.get('doi') or ''
+                        if enhanced_citation.venue and enhanced_citation.venue != 'Unknown':
+                            new_venue = enhanced_citation.venue
+                        else:
+                            new_venue = cr_paper.get('venue', '') or enhanced_citation.venue
+                        new_year = enhanced_citation.year or cr_paper.get('year', 0) or 0
+
+                        if (new_doi != enhanced_citation.doi
+                                or new_venue != enhanced_citation.venue
+                                or new_year != enhanced_citation.year):
                             enhanced_citation = Citation(
                                 citing_paper_title=enhanced_citation.citing_paper_title,
                                 citing_authors=enhanced_citation.citing_authors,
-                                venue=cr_paper.get('venue', '') or enhanced_citation.venue,
-                                year=cr_paper.get('year', 0) or enhanced_citation.year,
+                                venue=new_venue,
+                                year=new_year,
                                 is_influential=enhanced_citation.is_influential,
                                 contexts=enhanced_citation.contexts,
                                 intents=enhanced_citation.intents,
                                 paper_id=enhanced_citation.paper_id,
-                                doi=cr_paper.get('doi', ''),
-                                url=enhanced_citation.url or f"https://doi.org/{cr_paper.get('doi', '')}",
+                                doi=new_doi,
+                                url=enhanced_citation.url or (f"https://doi.org/{new_doi}" if new_doi else ''),
                                 authors_with_ids=enhanced_citation.authors_with_ids,
-                                citation_count=cr_paper.get('citation_count', 0) or enhanced_citation.citation_count,
+                                # Crossref normalizes the count under 'citationCount'
+                                citation_count=cr_paper.get('citationCount', 0) or enhanced_citation.citation_count,
                                 influential_citation_count=enhanced_citation.influential_citation_count
                             )
                             crossref_enhanced_count += 1
@@ -425,18 +507,24 @@ class HybridAPIClient:
         
         return enhanced
     
-    def _merge_author_ids(self, gs_authors: List[AuthorInfo], s2_authors: List[AuthorInfo]) -> List[AuthorInfo]:
+    def _merge_author_ids(self, gs_authors: List[AuthorInfo], s2_authors: List[AuthorInfo],
+                          paper_title: str = '') -> List[AuthorInfo]:
         """
         Merge author info from GS and S2, keeping BOTH IDs when available.
-        
+
         GS gives us: gs:XXXX IDs (profile links from citation page)
         S2 gives us: S2 author IDs (for API lookup, author disambiguation)
-        
+
         Strategy:
         1. Match by last name
         2. Keep GS ID (has profile link) + S2 ID (has API access)
         3. Use fuller name (e.g., "Chakkrit Tantithamthavorn" over "C. Tantithamthavorn")
         4. Check author cache for publication-based matching
+
+        Args:
+            paper_title: Title of the citing paper these authors appear on.
+                When provided, name-only cache hits are verified against it
+                (guards against same-named researchers).
         """
         if not gs_authors and not s2_authors:
             return []
@@ -503,8 +591,13 @@ class HybridAPIClient:
         # Add any S2 authors not matched (these might be authors without GS profiles)
         for i, s2_author in enumerate(s2_authors):
             if i not in used_s2:
-                # Check cache for this author by name
-                cached = author_cache.get_by_any_id(name=s2_author.name)
+                # Check cache for this author by name (verify name-only hits
+                # against the citing paper title to avoid same-name collisions)
+                if paper_title:
+                    cached = author_cache.get_by_any_id(name=s2_author.name,
+                                                        verify_titles=[paper_title])
+                else:
+                    cached = author_cache.get_by_any_id(name=s2_author.name)
                 if cached and cached.get('google_scholar_id'):
                     # Found in cache with GS ID! Use that info
                     gs_id = f"gs:{cached['google_scholar_id']}"
@@ -517,27 +610,43 @@ class HybridAPIClient:
                 else:
                     merged.append(s2_author)
         
-        return merged[:5]  # Limit to first 5
+        # Return ALL merged authors (keep consistent with citing_authors; callers slice as needed)
+        return merged
     
-    def get_author(self, author_name: str) -> Optional[Author]:
+    def get_author(self, author_name: str, context_title: Optional[str] = None) -> Optional[Author]:
         """
         Get author info from best available source
-        
+
         Strategy:
         1. Check persistent cache - only use if has Google Scholar h-index
         2. Try S2/OpenAlex (has institution type)
         3. ALWAYS call GS for h-index (much more accurate than S2!)
         4. Merge best data from both sources
         5. Save to persistent cache with all profile IDs
+
+        Args:
+            author_name: Author name to search for
+            context_title: Optional title of a paper this author wrote (e.g.
+                the citing paper). Used to verify name-only cache hits, which
+                upgrades the match confidence from 'name' to 'verified'.
         """
         # Check in-memory cache first
         name_cache_key = f"name:{_normalize_name(author_name)}"
         if name_cache_key in self._author_cache:
             return self._author_cache[name_cache_key]
-        
+
         # Check persistent cache - only use if we have GS h-index (accurate)
         persistent_cache = get_author_cache()
-        cached_info = persistent_cache.get_by_any_id(name=author_name)
+        if context_title:
+            # Corroborate the name-only hit against a known paper by this author
+            cached_info = persistent_cache.get_by_any_id(name=author_name,
+                                                         verify_titles=[context_title])
+        else:
+            cached_info = persistent_cache.get_by_any_id(name=author_name)
+        # Name-based resolution: publication-verified hits rank above bare name hits
+        cache_confidence = ''
+        if cached_info:
+            cache_confidence = 'verified' if context_title else 'name'
         if cached_info and cached_info.get('h_index_source') == 'google_scholar':
             # We have accurate GS h-index, use cached data
             try:
@@ -552,16 +661,21 @@ class HybridAPIClient:
                     google_scholar_id=cached_info.get('google_scholar_id', ''),
                     orcid_id=cached_info.get('orcid_id', ''),
                     homepage=cached_info.get('homepage', ''),
-                    h_index_source=cached_info.get('h_index_source', '')
+                    h_index_source=cached_info.get('h_index_source', ''),
+                    match_confidence=cache_confidence,
+                    country=cached_info.get('country', '') or ''
                 )
                 self._author_cache[name_cache_key] = author
                 return author
             except (ValueError, TypeError):
                 pass  # Invalid cache entry, fetch fresh
-        
+
         # Try S2/OpenAlex first (has better institution data)
         s2_author = self.s2_client.get_author(author_name)
-        
+        # Name-only search result - may be a same-named person (keep higher if
+        # the unified client already corroborated the match)
+        _apply_confidence(s2_author, 'name')
+
         best_author = s2_author
         
         # Try to get GS h-index ONLY if we have the author's GS ID
@@ -603,10 +717,22 @@ class HybridAPIClient:
                         semantic_scholar_id=getattr(s2_author, 'semantic_scholar_id', ''),
                         google_scholar_id=getattr(gs_author, 'google_scholar_id', ''),
                         homepage=getattr(gs_author, 'homepage', ''),
-                        h_index_source=h_index_source
+                        h_index_source=h_index_source,
+                        # Merged from name-based sources: keep the highest level
+                        match_confidence=_highest_confidence(
+                            getattr(s2_author, 'match_confidence', ''), cache_confidence),
+                        # Preserve a non-empty country from either side
+                        country=(getattr(s2_author, 'country', '')
+                                 or getattr(gs_author, 'country', '') or '')
                     )
                 else:
-                    best_author = gs_author
+                    # GS profile was fetched by ID, but the name->ID association
+                    # came from a name-keyed cache entry: cap the confidence at
+                    # the cache lookup's level (copy so the GS client's own
+                    # cached object is not downgraded)
+                    best_author = _apply_confidence(copy.copy(gs_author),
+                                                    cache_confidence or 'name',
+                                                    override=True)
         
         if best_author:
             # Cache in memory
@@ -633,7 +759,8 @@ class HybridAPIClient:
                 'google_scholar_id': getattr(best_author, 'google_scholar_id', ''),
                 'orcid_id': getattr(best_author, 'orcid_id', ''),
                 'homepage': getattr(best_author, 'homepage', ''),
-                'h_index_source': getattr(best_author, 'h_index_source', '')
+                'h_index_source': getattr(best_author, 'h_index_source', ''),
+                'country': getattr(best_author, 'country', '')
             }
             persistent_cache.update_profile(author_dict, publications=publications)
         
@@ -652,12 +779,17 @@ class HybridAPIClient:
         """
         cache_key = f"s2:{author_id}"
         if cache_key in self._author_cache:
-            return self._author_cache[cache_key]
-        
+            # Resolved via a real S2 author ID
+            return _apply_confidence(self._author_cache[cache_key], 'id')
+
         # Also check normalized name cache (avoid duplicate GS calls)
         name_cache_key = f"name:{_normalize_name(author_name)}" if author_name else None
         if name_cache_key and name_cache_key in self._author_cache:
-            return self._author_cache[name_cache_key]
+            cached_author = self._author_cache[name_cache_key]
+            if getattr(cached_author, 'semantic_scholar_id', '') == author_id:
+                # The cached profile carries this exact S2 ID: ID-confirmed match
+                _apply_confidence(cached_author, 'id')
+            return cached_author
         
         # Check persistent cache by S2 ID or name
         persistent_cache = get_author_cache()
@@ -682,7 +814,11 @@ class HybridAPIClient:
                     google_scholar_id=cached_info.get('google_scholar_id', ''),
                     orcid_id=cached_info.get('orcid_id', ''),
                     homepage=cached_info.get('homepage', ''),
-                    h_index_source=cached_info.get('h_index_source', '')
+                    h_index_source=cached_info.get('h_index_source', ''),
+                    # 'id' only if the cache entry matched on the real S2 ID;
+                    # otherwise this was a name-key hit (same-name risk)
+                    match_confidence='id' if cached_info.get('semantic_scholar_id', '') == author_id else 'name',
+                    country=cached_info.get('country', '') or ''
                 )
                 # Cache in memory
                 self._author_cache[cache_key] = author
@@ -694,10 +830,17 @@ class HybridAPIClient:
         
         # Get from S2 first (to get author's full name and publications for matching)
         s2_author = self.s2_client.get_author_by_s2_id(author_id, author_name)
-        
+
         if not s2_author:
             return None
-        
+
+        # The unified client stamps 'name'/'verified' when the S2 ID fetch
+        # failed (timeout/rate-limit) and it fell back to a name-only search.
+        # Only a genuine ID resolution may be labeled 'id' below - a fallback
+        # profile may belong to a same-named person.
+        s2_confidence = getattr(s2_author, 'match_confidence', '') or ''
+        id_resolved = s2_confidence not in ('name', 'verified')
+
         # Get S2 author's publications (for GS profile matching via paper overlap)
         s2_publications = []
         try:
@@ -717,10 +860,14 @@ class HybridAPIClient:
         
         if self.gs_available and self.gs_client:
             # Try to find GS ID from cache (by name, S2 ID, or publication overlap!)
+            # verify_titles gates pure name-key hits so a same-named person's GS
+            # profile can't attach to an S2-ID-resolved author
+            verify_titles = [p.get('title', '') for p in (s2_publications or []) if p.get('title')] or None
             cached_profile = persistent_cache.get_by_any_id(
                 name=s2_author.name,
                 semantic_scholar_id=author_id,
-                publications=s2_publications  # Match by shared papers!
+                publications=s2_publications,  # Match by shared papers!
+                verify_titles=verify_titles
             )
             
             if cached_profile and cached_profile.get('google_scholar_id'):
@@ -761,11 +908,15 @@ class HybridAPIClient:
                 institution_type=gs_author.institution_type if gs_author.institution_type != 'other' else s2_author.institution_type,
                 works_count=max(s2_author.works_count, gs_author.works_count),
                 citation_count=max(s2_author.citation_count, gs_author.citation_count),
-                # Profile IDs for linking
-                semantic_scholar_id=author_id,
+                # Profile IDs for linking (only claim the S2 ID when the
+                # profile was actually resolved through it)
+                semantic_scholar_id=author_id if id_resolved else (getattr(s2_author, 'semantic_scholar_id', '') or ''),
                 google_scholar_id=gs_id or getattr(gs_author, 'google_scholar_id', ''),
                 homepage=getattr(gs_author, 'homepage', ''),
-                h_index_source=h_index_source
+                h_index_source=h_index_source,
+                # Preserve a non-empty country from either side (GS rarely has one)
+                country=(getattr(gs_author, 'country', '')
+                         or getattr(s2_author, 'country', '') or '')
             )
         else:
             # No GS data, use S2 (with proper object)
@@ -776,13 +927,21 @@ class HybridAPIClient:
                 institution_type=s2_author.institution_type,
                 works_count=s2_author.works_count,
                 citation_count=s2_author.citation_count,
-                semantic_scholar_id=author_id,
-                h_index_source='semantic_scholar'
+                semantic_scholar_id=author_id if id_resolved else (getattr(s2_author, 'semantic_scholar_id', '') or ''),
+                h_index_source='semantic_scholar',
+                country=getattr(s2_author, 'country', '') or ''
             )
-        
+
+        # Resolved via a real S2 author ID from the citation record - but keep
+        # the unified client's own stamp when it had to fall back to a name search
+        _apply_confidence(best_author, 'id' if id_resolved else s2_confidence)
+
         # Cache in memory under ID, name, and resolved name
         resolved_name_key = f"name:{_normalize_name(best_author.name)}"
-        self._author_cache[cache_key] = best_author
+        if id_resolved:
+            # Only ID-verified profiles may live under the s2: key
+            # (cache hits on it are restamped 'id')
+            self._author_cache[cache_key] = best_author
         self._author_cache[resolved_name_key] = best_author
         if name_cache_key:
             self._author_cache[name_cache_key] = best_author
@@ -801,7 +960,8 @@ class HybridAPIClient:
             'google_scholar_id': getattr(best_author, 'google_scholar_id', gs_id or ''),
             'orcid_id': getattr(best_author, 'orcid_id', ''),
             'homepage': getattr(best_author, 'homepage', ''),
-            'h_index_source': getattr(best_author, 'h_index_source', '')
+            'h_index_source': getattr(best_author, 'h_index_source', ''),
+            'country': getattr(best_author, 'country', '')
         }
         persistent_cache.update_profile(author_dict, publications=s2_publications)
         
@@ -822,11 +982,49 @@ class HybridAPIClient:
     def categorize_institution(self, institution_type: str, affiliation: str = None) -> str:
         """Categorize institution (delegates to S2 client)"""
         return self.s2_client.categorize_institution(institution_type, affiliation)
+
+    def get_field_normalized_metrics(self, title: str, doi: str = None) -> Optional[Dict]:
+        """Field-normalized impact metrics (delegates to OpenAlex via unified client)"""
+        return self.s2_client.get_field_normalized_metrics(title, doi=doi)
+
+    def reset_failure_counts(self):
+        """Zero the per-API failure counters (delegates to the S2/OpenAlex client)"""
+        self.s2_client.reset_failure_counts()
+
+    def get_failure_counts(self) -> Dict[str, int]:
+        """Copy of the per-API permanent-failure counts (delegates to the S2/OpenAlex client)"""
+        return self.s2_client.get_failure_counts()
     
     def get_author_by_id(self, author_id: str) -> Optional[Dict]:
         """Get raw author data by S2 ID"""
         return self.s2_client.get_author_by_id(author_id)
-    
+
+    def search_author_candidates(self, author_name: str, limit: int = 5) -> List[Dict]:
+        """
+        Search for author candidates by name (delegates to the S2 client).
+
+        Returns up to `limit` dicts with keys:
+        'author_id', 'name', 'affiliation', 'h_index', 'paper_count'.
+        Empty list on failure.
+        """
+        try:
+            return self.s2_client.search_author_candidates(author_name, limit=limit)
+        except Exception:
+            return []
+
+    def get_authors_batch(self, author_ids: List[str]) -> Dict[str, Author]:
+        """
+        Batch-resolve Semantic Scholar author IDs (delegates to the S2 client).
+
+        Returns:
+            Dict mapping author_id -> Author for the ids that resolved.
+            Empty dict on failure.
+        """
+        try:
+            return self.s2_client.get_authors_batch(author_ids)
+        except Exception:
+            return {}
+
     def batch_fetch_gs_authors(self, gs_ids: List[str]) -> Dict[str, Author]:
         """
         Batch fetch multiple Google Scholar author profiles efficiently.
@@ -872,7 +1070,9 @@ class HybridAPIClient:
                         google_scholar_id=gs_id,
                         semantic_scholar_id=cached_info.get('semantic_scholar_id', ''),
                         homepage=cached_info.get('homepage', ''),
-                        h_index_source='google_scholar'
+                        h_index_source='google_scholar',
+                        match_confidence='id',  # Looked up by real GS profile ID
+                        country=cached_info.get('country', '') or ''
                     )
                     results[gs_id] = author
                     self._author_cache[cache_key] = author
@@ -895,6 +1095,8 @@ class HybridAPIClient:
             
             # Save fetched authors to cache
             for gs_id, author in fetched.items():
+                # Fetched directly from the GS profile page by ID
+                _apply_confidence(author, 'id')
                 results[gs_id] = author
                 cache_key = f"gs:{gs_id}"
                 self._author_cache[cache_key] = author
@@ -909,7 +1111,8 @@ class HybridAPIClient:
                     'citation_count': author.citation_count,
                     'google_scholar_id': gs_id,
                     'homepage': getattr(author, 'homepage', ''),
-                    'h_index_source': 'google_scholar'
+                    'h_index_source': 'google_scholar',
+                    'country': getattr(author, 'country', '')
                 }
                 persistent_cache.update_profile(author_dict)
         
@@ -950,7 +1153,9 @@ class HybridAPIClient:
                     google_scholar_id=gs_id,
                     semantic_scholar_id=cached_info.get('semantic_scholar_id', ''),
                     homepage=cached_info.get('homepage', ''),
-                    h_index_source='google_scholar'
+                    h_index_source='google_scholar',
+                    match_confidence='id',  # Looked up by real GS profile ID
+                    country=cached_info.get('country', '') or ''
                 )
                 self._author_cache[cache_key] = author
                 return author
@@ -962,6 +1167,8 @@ class HybridAPIClient:
             try:
                 gs_author = self.gs_client.get_author_by_gs_id(gs_id)
                 if gs_author:
+                    # Fetched directly from the GS profile page by ID
+                    _apply_confidence(gs_author, 'id')
                     # Cache and save
                     self._author_cache[cache_key] = gs_author
                     if author_name:
@@ -978,7 +1185,8 @@ class HybridAPIClient:
                         'citation_count': gs_author.citation_count,
                         'google_scholar_id': gs_id,
                         'homepage': getattr(gs_author, 'homepage', ''),
-                        'h_index_source': 'google_scholar'
+                        'h_index_source': 'google_scholar',
+                        'country': getattr(gs_author, 'country', '')
                     }
                     persistent_cache.update_profile(author_dict)
                     
@@ -1004,8 +1212,10 @@ class HybridAPIClient:
         if not author_name or not paper_title:
             return None
         
-        # First check cache by name
-        cached = self.get_author(author_name)
+        # First check cache by name (cache-only: a fresh name search here would
+        # short-circuit the paper-based disambiguation this method exists for).
+        # Persistent name-key hits are verified against the citing paper title.
+        cached = self._get_cached_author_by_name(author_name, verify_title=paper_title)
         if cached and cached.h_index > 0:
             return cached
         
@@ -1030,7 +1240,9 @@ class HybridAPIClient:
                     semantic_scholar_id=cached_by_pub.get('semantic_scholar_id', ''),
                     google_scholar_id=cached_by_pub.get('google_scholar_id', ''),
                     orcid_id=cached_by_pub.get('orcid_id', ''),
-                    h_index_source=cached_by_pub.get('h_index_source', '')
+                    h_index_source=cached_by_pub.get('h_index_source', ''),
+                    match_confidence='verified',  # Corroborated by publication overlap
+                    country=cached_by_pub.get('country', '') or ''
                 )
             except (ValueError, TypeError):
                 pass
@@ -1059,8 +1271,11 @@ class HybridAPIClient:
                             if s2_last_name == author_last_name:
                                 result = self.get_author_by_s2_id(s2_id, s2_name)
                                 if result:
-                                    return result
-                        
+                                    # The S2 ID was derived by matching the author on
+                                    # the paper they wrote: publication-membership
+                                    # verified (not an ID straight from the citation)
+                                    return _apply_confidence(result, 'verified', override=True)
+
                         # Try fuzzy match
                         for author in authors:
                             s2_name = author.get('name', '')
@@ -1069,41 +1284,89 @@ class HybridAPIClient:
                                 if SequenceMatcher(None, author_name.lower(), s2_name.lower()).ratio() > 0.7:
                                     result = self.get_author_by_s2_id(s2_id, s2_name)
                                     if result:
-                                        return result
+                                        # Publication-membership verified (see above)
+                                        return _apply_confidence(result, 'verified', override=True)
         except Exception:
             pass
         
         # Strategy 2: Try ORCID (free API, has affiliation data)
         try:
-            from .orcid import OrcidClient
-            orcid_client = OrcidClient()
-            orcid_author = orcid_client.search_author(author_name)
-            
+            from .orcid import ORCIDClient
+            orcid_client = ORCIDClient()
+            orcid_results = orcid_client.search_author(author_name)
+            orcid_author = orcid_results[0] if orcid_results else None
+
             if orcid_author:
                 # Found on ORCID!
                 return Author(
-                    name=orcid_author.get('name', author_name),
+                    name=orcid_author.get('name') or author_name,
                     h_index=0,  # ORCID doesn't have h-index
                     affiliation=orcid_author.get('affiliation', 'Unknown'),
-                    institution_type=orcid_author.get('institution_type', 'other'),
+                    institution_type=orcid_author.get('affiliation_type', 'other'),
                     works_count=orcid_author.get('works_count', 0),
                     citation_count=0,
                     orcid_id=orcid_author.get('orcid_id', ''),
-                    h_index_source='orcid'
+                    h_index_source='orcid',
+                    match_confidence='name'  # ORCID hit came from a name search
                 )
-        except Exception:
-            pass
-        
+        except Exception as e:
+            print(f"[Hybrid] ORCID lookup failed: {e}")
+
         # Strategy 3: Return basic info from S2 even without h-index
         try:
             s2_author = self.s2_client.get_author(author_name)
             if s2_author:
-                return s2_author
+                # Fell through to a bare name search - unverified
+                return _apply_confidence(s2_author, 'name')
         except Exception:
             pass
-        
+
         return None
-    
+
+    def _get_cached_author_by_name(self, author_name: str,
+                                   verify_title: Optional[str] = None) -> Optional[Author]:
+        """
+        Look up an author by name in the in-memory/persistent caches ONLY.
+        No API search is performed (name searches are inaccurate for common names).
+
+        Args:
+            author_name: Author name to look up
+            verify_title: Optional paper title written by this author. When
+                provided, persistent name-key hits must overlap the cached
+                publications (guards against same-named researchers) and the
+                returned Author is marked 'verified' instead of 'name'.
+        """
+        name_cache_key = f"name:{_normalize_name(author_name)}"
+        if name_cache_key in self._author_cache:
+            return self._author_cache[name_cache_key]
+
+        persistent_cache = get_author_cache()
+        if verify_title:
+            cached_info = persistent_cache.get_by_any_id(name=author_name,
+                                                         verify_titles=[verify_title])
+        else:
+            cached_info = persistent_cache.get_by_any_id(name=author_name)
+        if cached_info and cached_info.get('h_index_source') == 'google_scholar':
+            try:
+                return Author(
+                    name=cached_info.get('name', author_name),
+                    h_index=cached_info.get('h_index', 0),
+                    affiliation=cached_info.get('affiliation', 'Unknown'),
+                    institution_type=cached_info.get('institution_type', 'other'),
+                    works_count=cached_info.get('works_count', 0),
+                    citation_count=cached_info.get('citation_count', 0),
+                    semantic_scholar_id=cached_info.get('semantic_scholar_id', ''),
+                    google_scholar_id=cached_info.get('google_scholar_id', ''),
+                    orcid_id=cached_info.get('orcid_id', ''),
+                    homepage=cached_info.get('homepage', ''),
+                    h_index_source=cached_info.get('h_index_source', ''),
+                    match_confidence='verified' if verify_title else 'name',
+                    country=cached_info.get('country', '') or ''
+                )
+            except (ValueError, TypeError):
+                pass  # Invalid cache entry
+        return None
+
     def _get_author_by_paper_s2(self, author_name: str, paper_title: str) -> Optional[Author]:
         """
         Helper: Find author via S2 paper search.
@@ -1135,8 +1398,13 @@ class HybridAPIClient:
                 
                 # Check if names are similar
                 if SequenceMatcher(None, author_name.lower(), s2_name.lower()).ratio() > 0.7:
-                    return self.get_author_by_s2_id(s2_id, s2_name)
-                    
+                    result = self.get_author_by_s2_id(s2_id, s2_name)
+                    if result:
+                        # Matched via the paper's author list: publication-
+                        # membership verified (S2 ID derived, not citation-given)
+                        return _apply_confidence(result, 'verified', override=True)
+                    return None
+
         except Exception as e:
             print(f"[Hybrid] Error finding author by paper: {e}")
         

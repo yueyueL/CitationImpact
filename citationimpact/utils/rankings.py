@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import re
+from functools import lru_cache
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple, Any
 
@@ -20,6 +21,11 @@ VENUE_DIR = DATA_DIR / "venues_rankings"
 # Cache for loaded data
 _core_rankings_cache: Optional[Dict[str, str]] = None
 _university_rankings_cache: Optional[Dict[str, Dict[str, Any]]] = None
+
+# Valid CORE/ICORE tier labels; anything else in the Rank column ("Unranked",
+# "National: USA", "TBR", "Journal Published", ...) is not a ranking tier and
+# must not be stored as one.
+VALID_CORE_RANKS = {"A*", "A", "B", "C"}
 
 
 def _store_venue_rank(
@@ -41,7 +47,9 @@ def _store_venue_rank(
         if not key:
             continue
         clean = str(key).strip()
-        if not clean:
+        # Skip empty keys and the literal "nan" produced by str() on NaN CSV
+        # cells; storing them would merge unrelated venues under one entry.
+        if not clean or clean.lower() == "nan":
             continue
         normalized_keys.extend([clean, clean.lower(), clean.upper()])
 
@@ -66,10 +74,8 @@ def _store_venue_rank(
     sources: Dict[str, str] = entry.setdefault("sources", {})  # type: ignore[assignment]
     sources[source] = rank_value
 
-    # Update canonical name if we received a cleaner one
-    first_key = keys[0] if keys else normalized_keys[0]
-    if first_key:
-        entry["canonical"] = str(first_key).strip() or entry["canonical"]
+    # Update canonical name if we received a cleaner one (first valid key)
+    entry["canonical"] = normalized_keys[0] or entry["canonical"]
 
     for key in normalized_keys:
         storage[key] = entry
@@ -103,10 +109,10 @@ def _store_university_entry(
         pass
 
     if isinstance(rank, str):
-        rank_str = rank.replace("=", "").strip()
-        if not rank_str or not rank_str.replace(".", "").replace("-", "").isdigit():
+        parsed_rank = parse_rank_value(rank)
+        if parsed_rank is None:
             return
-        rank_value = int(float(rank_str))
+        rank_value = parsed_rank
     elif isinstance(rank, (int, float)):
         if pd.isna(rank):  # type: ignore[attr-defined]
             return
@@ -149,6 +155,8 @@ def _store_university_entry(
     current_primary = entry.get("primary_source")
     if (
         current_primary is None
+        # Re-storing data for the current primary source must refresh rank/tier
+        or source_key == current_primary
         or source_key in preferred_order
         and (
             current_primary not in preferred_order
@@ -251,6 +259,10 @@ def parse_rank_value(value: Any) -> Optional[int]:
     if not text:
         return None
     text = text.replace("=", "").replace("#", "")
+    # Handle range displays such as "601-610" or "1401+" (use the lower bound)
+    text = text.rstrip("+").strip()
+    if "-" in text:
+        text = text.split("-", 1)[0].strip()
     if text.isdigit():
         return int(text)
     try:
@@ -327,7 +339,7 @@ def load_core_rankings() -> Optional[Dict[str, str]]:
                     rank_value = str(row.get("Rank", "")).strip()
                     acronym = str(row.get("Acronym", "")).strip()
                     title = str(row.get("Title", "")).strip()
-                    if rank_value:
+                    if rank_value in VALID_CORE_RANKS:
                         _store_venue_rank(rankings, [acronym, title], rank_value, source="icore")
             except Exception as exc:  # pragma: no cover - defensive logging
                 print(f"[Warning] Failed to load ICORE rankings: {exc}")
@@ -358,8 +370,16 @@ def load_core_rankings() -> Optional[Dict[str, str]]:
     return rankings
 
 
+@lru_cache(maxsize=None)
+def _normalize_ranking_name(name: str) -> str:
+    """Normalize a name for matching: lowercase, drop parentheticals/punctuation."""
+    text = re.sub(r"\([^()]*\)", " ", str(name).lower())
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return " ".join(text.split())
+
+
 def _find_venue_entry(rankings: Optional[Dict[str, Dict[str, Any]]], venue_name: str) -> Optional[Dict[str, Any]]:
-    """Return the ranking entry for a venue using fuzzy matching."""
+    """Return the ranking entry for a venue using exact/normalized matching."""
     if not rankings or not venue_name:
         return None
 
@@ -376,20 +396,21 @@ def _find_venue_entry(rankings: Optional[Dict[str, Dict[str, Any]]], venue_name:
         if key in rankings:
             return rankings[key]
 
-    # Partial match (avoid noisy very short tokens)
-    venue_lower = normalized.lower()
-    for key, entry in rankings.items():
-        key_lower = key.lower()
-        if min(len(key_lower), len(venue_lower)) < 4:
-            continue
-        if venue_lower in key_lower or key_lower in venue_lower:
-            return entry
+    # Normalized match (ignore case, punctuation and parenthetical acronyms).
+    # Substring containment is deliberately NOT used here: it matched unrelated
+    # venues (e.g. "Artificial Intelligence" resolved to "Artificial
+    # Intelligence Applications and Innovations").
+    venue_norm = _normalize_ranking_name(normalized)
+    if venue_norm:
+        for key, entry in rankings.items():
+            if _normalize_ranking_name(key) == venue_norm:
+                return entry
 
     return None
 
 
 def _find_university_entry(rankings: Optional[Dict[str, Dict[str, Any]]], university_name: str) -> Optional[Dict[str, Any]]:
-    """Return the ranking entry for a university using fuzzy matching."""
+    """Return the ranking entry for a university using exact/normalized matching."""
     if not rankings or not university_name:
         return None
 
@@ -401,13 +422,13 @@ def _find_university_entry(rankings: Optional[Dict[str, Dict[str, Any]]], univer
         if key in rankings:
             return rankings[key]
 
-    uni_lower = normalized.lower()
-    for key, entry in rankings.items():
-        key_lower = key.lower()
-        if min(len(key_lower), len(uni_lower)) < 4:
-            continue
-        if uni_lower in key_lower or key_lower in uni_lower:
-            return entry
+    # Normalized match only; substring containment misattributed rankings
+    # (e.g. "National University" resolved to National University of Singapore).
+    uni_norm = _normalize_ranking_name(normalized)
+    if uni_norm:
+        for key, entry in rankings.items():
+            if _normalize_ranking_name(key) == uni_norm:
+                return entry
 
     return None
 

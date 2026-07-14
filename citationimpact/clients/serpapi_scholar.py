@@ -96,15 +96,17 @@ class SerpAPIScholarClient:
         cites_id = cited_by.get("cites_id", "")
         
         print(f"[SerpAPI] Found: {paper.get('title', '')[:50]}... ({citation_count} citations)")
-        
+
+        summary = paper.get('publication_info', {}).get('summary', '')
+
         return {
             'title': paper.get('title', ''),
             'citationCount': citation_count,
             'paperId': f"serpapi_{cites_id}" if cites_id else f"serpapi_{hash(title)}",
             'cites_id': cites_id,
             'authors': [a.get('name', '') for a in paper.get('publication_info', {}).get('authors', [])],
-            'venue': paper.get('publication_info', {}).get('summary', ''),
-            'year': self._extract_year(paper.get('publication_info', {}).get('summary', '')),
+            'venue': self._extract_venue(summary),
+            'year': self._extract_year(summary),
             'url': paper.get('link', ''),
             'snippet': paper.get('snippet', '')
         }
@@ -307,11 +309,12 @@ class SerpAPIScholarClient:
     
     def _extract_venue(self, summary: str) -> str:
         """Extract venue from publication summary"""
-        # Summary format: "Author1, Author2 - Journal/Conference, Year"
+        # Summary format: "Author1, Author2 - Journal/Conference, Year - domain"
+        # (the trailing domain part may be absent)
         if ' - ' in summary:
             parts = summary.split(' - ')
             if len(parts) >= 2:
-                venue_part = parts[-1]
+                venue_part = parts[1]
                 # Remove year
                 import re
                 venue = re.sub(r',?\s*(19|20)\d{2}$', '', venue_part).strip()

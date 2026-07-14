@@ -14,6 +14,7 @@ No API key required
 
 import requests
 import time
+import xml.etree.ElementTree as ET
 from typing import Optional, Dict, List
 
 
@@ -77,25 +78,28 @@ class DBLPClient:
             search_title_lower = title.lower()
             best_match = None
             best_score = 0
-            
+
+            # Strip punctuation from words (DBLP titles end with a period)
+            search_words = {w.strip('.,:;!?') for w in search_title_lower.split()} - {''}
+
             for hit in hits:
                 info = hit.get('info', {})
                 paper_title = info.get('title', '').lower()
-                
+
                 # Simple similarity: count matching words
-                search_words = set(search_title_lower.split())
-                paper_words = set(paper_title.split())
+                paper_words = {w.strip('.,:;!?') for w in paper_title.split()} - {''}
                 overlap = len(search_words & paper_words)
                 score = overlap / max(len(search_words), 1)
-                
+
                 if score > best_score:
                     best_score = score
                     best_match = hit
-            
+
             if best_match and best_score > 0.5:
                 return self._normalize_paper(best_match)
-            
-            return self._normalize_paper(hits[0])
+
+            # No hit is a good enough title match
+            return None
             
         except Exception as e:
             print(f"[DBLP] Error searching paper: {e}")
@@ -154,24 +158,23 @@ class DBLPClient:
         """
         try:
             # Convert URL to API endpoint
-            if '/pid/' in author_url:
-                api_url = author_url.replace('https://dblp.org/', f'{self.BASE_URL}/') + '.json'
-            else:
-                api_url = author_url + '.json' if not author_url.endswith('.json') else author_url
-            
-            response = self.session.get(api_url, timeout=self.timeout)
+            # DBLP person pages only serve XML (there is no .json endpoint)
+            api_url = author_url if author_url.endswith('.xml') else author_url + '.xml'
+
+            response = self.session.get(api_url, timeout=self.timeout,
+                                        headers={'Accept': 'application/xml'})
             response.raise_for_status()
-            
-            data = response.json()
-            
-            # Extract publications
+
+            root = ET.fromstring(response.content)
+
+            # Extract publications: each <r> element wraps one publication
+            # element (article, inproceedings, etc.)
             publications = []
-            for pub in data.get('dblpPerson', {}).get('r', []):
-                # Each 'r' entry can be article, inproceedings, etc.
-                for pub_type, pub_data in pub.items():
-                    if isinstance(pub_data, dict):
-                        publications.append(self._normalize_publication(pub_data, pub_type))
-            
+            for record in root.findall('r'):
+                for pub_elem in record:
+                    pub_data = self._pub_element_to_dict(pub_elem)
+                    publications.append(self._normalize_publication(pub_data, pub_elem.tag))
+
             return publications
             
         except Exception as e:
@@ -227,6 +230,9 @@ class DBLPClient:
         authors_data = info.get('authors', {}).get('author', [])
         if isinstance(authors_data, str):
             authors = [authors_data]
+        elif isinstance(authors_data, dict):
+            # DBLP collapses single-author lists into a bare dict
+            authors = [authors_data.get('text', '')]
         elif isinstance(authors_data, list):
             authors = [a if isinstance(a, str) else a.get('text', '') for a in authors_data]
         else:
@@ -249,14 +255,30 @@ class DBLPClient:
             '_source': 'dblp'
         }
     
+    def _pub_element_to_dict(self, elem: ET.Element) -> Dict:
+        """Convert a DBLP publication XML element into a plain dict"""
+        pub_data: Dict = {}
+        for child in elem:
+            text = ''.join(child.itertext()).strip()
+            if child.tag == 'author':
+                pub_data.setdefault('author', []).append(text)
+            elif child.tag not in pub_data:
+                pub_data[child.tag] = text
+        return pub_data
+
     def _normalize_publication(self, pub_data: Dict, pub_type: str) -> Dict:
         """Normalize a publication from author page"""
-        # Handle authors which can be string or list
+        # Handle authors which can be string, dict (single author) or list
         authors = pub_data.get('author', [])
         if isinstance(authors, str):
             authors = [authors]
+        elif isinstance(authors, dict):
+            # DBLP collapses single-author lists into a bare dict
+            authors = [authors.get('text', '')]
         elif isinstance(authors, list):
             authors = [a if isinstance(a, str) else a.get('text', '') for a in authors]
+        else:
+            authors = []
         
         return {
             'title': pub_data.get('title', ''),

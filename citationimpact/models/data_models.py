@@ -20,6 +20,14 @@ class Author:
     homepage: str = ""             # Personal/lab homepage
     # Data source info
     h_index_source: str = ""       # Which API provided h-index (gs/s2/openalex)
+    # How confident we are that this profile belongs to the right person:
+    #   'id'       - resolved via a unique identifier (S2 author ID / GS profile ID)
+    #   'verified' - name search corroborated by evidence (publication overlap)
+    #   'name'     - name-only search result, unverified (may be wrong person)
+    #   ''         - unknown (legacy/cached data)
+    match_confidence: str = ""
+    # Institution country (ISO 3166-1 alpha-2, e.g. 'US'), '' when unknown
+    country: str = ""
 
     def __post_init__(self):
         """Validate Author data"""
@@ -35,7 +43,13 @@ class Author:
             raise ValueError("works_count must be a non-negative integer")
         if not isinstance(self.citation_count, int) or self.citation_count < 0:
             raise ValueError("citation_count must be a non-negative integer")
-    
+        if self.match_confidence not in ('', 'id', 'verified', 'name'):
+            raise ValueError("match_confidence must be one of '', 'id', 'verified', 'name'")
+        if not isinstance(self.country, str):
+            raise ValueError("country must be a string")
+        # Normalize to uppercase ISO 3166-1 alpha-2 form (e.g. 'us' -> 'US')
+        self.country = self.country.strip().upper()
+
     def get_profile_url(self) -> str:
         """Get the best profile URL for this author"""
         if self.google_scholar_id:

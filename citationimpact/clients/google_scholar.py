@@ -5,12 +5,14 @@ NOTE: This is slower than API-based clients and may encounter CAPTCHAs.
 Use only when Semantic Scholar/OpenAlex don't have your paper.
 """
 
+import copy
+import re
 import time
 import random
 import signal
 import threading
 from typing import Optional, List, Dict
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, quote_plus
 from scholarly import scholarly, ProxyGenerator
 
 from ..models import Author, Venue, Citation, AuthorInfo
@@ -30,18 +32,31 @@ class Colors:
 def _timeout_call(func, args=(), kwargs=None, timeout=30, default=None):
     """
     Call a function with a timeout. Returns default if timeout occurs.
-    
+
     Uses threading to avoid issues with signal on non-main threads.
+
+    The worker operates on a deep copy of the arguments: on timeout the thread
+    is abandoned but keeps running (Python threads cannot be killed), and
+    scholarly.fill mutates its argument in place. Without the copy, the
+    abandoned thread would keep writing to the very dict returned as `default`
+    while the caller reads it.
     """
     if kwargs is None:
         kwargs = {}
-    
+
     result = [default]
     exception = [None]
-    
+
+    try:
+        worker_args = copy.deepcopy(args)
+        worker_kwargs = copy.deepcopy(kwargs)
+    except Exception:
+        # Not copyable - fall back to the originals
+        worker_args, worker_kwargs = args, kwargs
+
     def target():
         try:
-            result[0] = func(*args, **kwargs)
+            result[0] = func(*worker_args, **worker_kwargs)
         except Exception as e:
             exception[0] = e
     
@@ -155,13 +170,6 @@ class GoogleScholarClient:
             scholarly.use_proxy(pg)
             print("[Google Scholar] ✅ Free proxies enabled")
 
-        if use_proxy:
-            print("[INFO] Setting up Google Scholar with proxy...")
-            pg = ProxyGenerator()
-            pg.FreeProxies()
-            scholarly.use_proxy(pg)
-            print("[INFO] Proxy enabled. This will be slower but may avoid blocks.")
-
     def _search_paper_selenium(self, title: str) -> Optional[Dict]:
         """
         Fallback paper search using Selenium with undetected-chromedriver.
@@ -173,7 +181,7 @@ class GoogleScholarClient:
             
         try:
             # Search Google Scholar directly
-            search_url = f"https://scholar.google.com/scholar?q={title.replace(' ', '+')}"
+            search_url = f"https://scholar.google.com/scholar?q={quote_plus(title)}"
             driver.get(search_url)
             time.sleep(random.uniform(2, 4))
             
@@ -205,7 +213,6 @@ class GoogleScholarClient:
                 if 'cites=' in href:
                     cites_id = href.split('cites=')[1].split('&')[0]
                 cite_text = cite_link.get_text()
-                import re
                 match = re.search(r'Cited by (\d+)', cite_text)
                 if match:
                     num_citations = int(match.group(1))
@@ -485,9 +492,11 @@ class GoogleScholarClient:
         import re
 
         # Try multiple CSS selectors (Google Scholar changes their structure)
+        # NOTE: attrs dicts must use 'class' (the 'class_' spelling only works
+        # as a keyword argument, not as an attrs-dict key)
         result_selectors = [
-            ('div', {'class_': 'gs_ri'}),  # Standard result item
-            ('div', {'class_': 'gs_r'}),   # Alternative result wrapper
+            ('div', {'class': 'gs_ri'}),  # Standard result item
+            ('div', {'class': 'gs_r'}),   # Alternative result wrapper
             ('div', {'data-rp': True}),    # Data-attribute based
         ]
         
@@ -519,10 +528,13 @@ class GoogleScholarClient:
                     continue
 
                 # Extract paper ID for BibTeX fetching (from data-cid or link)
-                paper_id = None
-                parent_div = result.find_parent('div', {'data-cid': True})
-                if parent_div:
-                    paper_id = parent_div.get('data-cid')
+                # data-cid lives on the outer gs_r wrapper, which may be the
+                # matched result itself or an ancestor of it (gs_ri)
+                paper_id = result.get('data-cid')
+                if not paper_id:
+                    parent_div = result.find_parent('div', {'data-cid': True})
+                    if parent_div:
+                        paper_id = parent_div.get('data-cid')
                 if not paper_id:
                     # Try to extract from "Cite" link
                     cite_link = result.find('a', {'class': 'gs_or_cit'}) or result.find('a', string=re.compile(r'Cite', re.I))
@@ -535,6 +547,7 @@ class GoogleScholarClient:
                 author_div = result.find('div', class_='gs_a') or result.find('div', class_='gs_gray')
                 authors = []
                 all_authors = []  # Complete author list (will try to get from BibTeX)
+                authors_truncated = False  # True if GS abbreviated the author list with '…'
                 venue = 'Unknown'
                 year = 0
 
@@ -550,6 +563,7 @@ class GoogleScholarClient:
                         # Handle "..." which indicates truncated author list
                         if '…' in author_str or '...' in author_str:
                             # Truncated! We should get full list from BibTeX later
+                            authors_truncated = True
                             authors = [a.strip() for a in author_str.replace('…', '').replace('...', '').split(',') if a.strip()]
                         else:
                             authors = [a.strip() for a in author_str.split(',') if a.strip()]
@@ -604,6 +618,7 @@ class GoogleScholarClient:
                 citing_papers.append({
                     'title': title,
                     'authors': authors if authors else ['Unknown'],
+                    'authors_truncated': authors_truncated,  # GS abbreviated the list ('…')
                     'author_profiles': author_profiles,  # Direct profile links from page
                     'paper_id': paper_id,  # For BibTeX fetching if needed
                     'venue': venue,
@@ -720,9 +735,11 @@ class GoogleScholarClient:
                 driver.get(page_url)
                 time.sleep(2)
                 
-                # Check for CAPTCHA on first page
+                # Check for CAPTCHA on first page (may restart browser in visible mode)
                 if page == 0:
-                    self._wait_for_captcha(driver)
+                    new_driver = self._wait_for_captcha(driver)
+                    if new_driver:
+                        driver = new_driver
                 
                 # Parse citations from page
                 from bs4 import BeautifulSoup
@@ -744,10 +761,12 @@ class GoogleScholarClient:
                         if not authors and paper.get('author'):
                             authors = [a.strip() for a in paper.get('author', '').split(',')]
                         
-                        # Check if author list was truncated (has "..." on page)
+                        # Check if author list was truncated (had "..." on page)
                         # If truncated, try to get full list from BibTeX
+                        # (the ellipsis markers were already stripped during
+                        # parsing, so rely on the 'authors_truncated' flag)
                         paper_id = paper.get('paper_id')
-                        if paper_id and any('…' in str(a) or '...' in str(a) for a in authors):
+                        if paper_id and paper.get('authors_truncated'):
                             bibtex_authors = self._fetch_bibtex_authors(paper_id, driver)
                             if bibtex_authors:
                                 print(f"[Google Scholar] Got {len(bibtex_authors)} authors from BibTeX (was truncated on page)")
@@ -1104,17 +1123,38 @@ class GoogleScholarClient:
                 h_index=h_index,
                 affiliation=affiliation,
                 institution_type=institution_type,
-                works_count=author.get('citedby', 0),
+                works_count=len(author.get('publications', []) or []),
                 citation_count=author.get('citedby', 0),
                 google_scholar_id=gs_author_id,
                 homepage=homepage,
-                h_index_source='google_scholar'
+                h_index_source='google_scholar',
+                match_confidence='name'  # scholarly name search - unverified match
             )
 
         except Exception as e:
             print(f"[Google Scholar] ⚠️ Error: {str(e)[:50]}")
             return None
     
+    @staticmethod
+    def _profile_link_matches_author(link_text: str, author_name: str) -> bool:
+        """
+        Fuzzy-match a search-result byline name against the queried author.
+
+        Google Scholar bylines abbreviate names (e.g. 'J Smith' for
+        'Jane Smith'), so we require the last names to match and, when both
+        names carry a leading first-name part, the first initials to match.
+        """
+        link_parts = [p for p in link_text.replace('.', ' ').replace(',', ' ').split() if p]
+        query_parts = [p for p in author_name.replace('.', ' ').replace(',', ' ').split() if p]
+        if not link_parts or not query_parts:
+            return False
+        if link_parts[-1].lower() != query_parts[-1].lower():
+            return False
+        if len(link_parts) > 1 and len(query_parts) > 1:
+            if link_parts[0][0].lower() != query_parts[0][0].lower():
+                return False
+        return True
+
     def _get_author_via_browser(self, author_name: str) -> Optional[Author]:
         """
         Get author info by directly visiting Google Scholar in browser.
@@ -1134,7 +1174,7 @@ class GoogleScholarClient:
             
             # Use regular search (doesn't require login) and look for author
             # Format: search for author's papers and find their profile link
-            search_url = f"https://scholar.google.com/scholar?q=author:{author_name.replace(' ', '+')}"
+            search_url = f"https://scholar.google.com/scholar?q=author:{quote_plus(author_name)}"
             driver.get(search_url)
             time.sleep(2)
             
@@ -1151,13 +1191,20 @@ class GoogleScholarClient:
             
             # Look for author profile link in search results
             # Author links look like: /citations?user=XXXXX
+            # Only scan author bylines (gs_a divs) and only accept links whose
+            # display name matches the searched author - the first profile
+            # link on the page may belong to a co-author!
             import re
             gs_author_id = None
             profile_url = None
-            
-            for link in soup.find_all('a', href=True):
-                href = link.get('href', '')
-                if '/citations?user=' in href:
+
+            for author_div in soup.find_all('div', class_='gs_a'):
+                for link in author_div.find_all('a', href=True):
+                    href = link.get('href', '')
+                    if '/citations?user=' not in href:
+                        continue
+                    if not self._profile_link_matches_author(link.get_text(strip=True), author_name):
+                        continue
                     match = re.search(r'user=([^&]+)', href)
                     if match:
                         gs_author_id = match.group(1)
@@ -1166,9 +1213,11 @@ class GoogleScholarClient:
                         else:
                             profile_url = href
                         break
-            
+                if profile_url:
+                    break
+
             if not profile_url:
-                print(f"[Google Scholar] ⚠️ No author profile found in search results")
+                print(f"[Google Scholar] ⚠️ No matching author profile found in search results")
                 return None
             
             # Visit author profile directly
@@ -1244,9 +1293,10 @@ class GoogleScholarClient:
                 citation_count=citation_count,
                 google_scholar_id=gs_author_id,
                 homepage=homepage,
-                h_index_source='google_scholar'
+                h_index_source='google_scholar',
+                match_confidence='name'  # Browser name search - unverified match
             )
-            
+
         except Exception as e:
             print(f"[Google Scholar] ⚠️ Browser error: {str(e)[:50]}")
             return None
@@ -1351,9 +1401,9 @@ class GoogleScholarClient:
             rank_tier='Unknown (Google Scholar has no venue rankings)'
         )
 
-    def categorize_institution(self, institution_type: str) -> str:
-        """Categorize institution type"""
-        return categorize_institution(institution_type)
+    def categorize_institution(self, institution_type: str, affiliation: str = None) -> str:
+        """Categorize institution type (affiliation enables enhanced detection)"""
+        return categorize_institution(institution_type, affiliation)
 
     def get_authors_by_gs_ids_batch(self, gs_ids: List[str]) -> Dict[str, Author]:
         """
@@ -1445,7 +1495,8 @@ class GoogleScholarClient:
                         citation_count=citation_count,  # Now properly extracted!
                         google_scholar_id=gs_id,
                         homepage=homepage or '',
-                        h_index_source='google_scholar'
+                        h_index_source='google_scholar',
+                        match_confidence='id'  # Resolved via unique GS profile ID
                     )
                     
                 except Exception as e:
@@ -1459,18 +1510,20 @@ class GoogleScholarClient:
         
         return results
 
-    def get_author_by_gs_id(self, gs_id: str) -> Optional[Author]:
+    def get_author_by_gs_id(self, gs_id: str, author_name: str = None) -> Optional[Author]:
         """
         Get author info directly from their Google Scholar profile page.
-        
+
         This is more reliable than scholarly.fill() because:
         - Single page load (no multiple hidden requests)
         - User can solve CAPTCHAs if needed
         - Less likely to timeout
-        
+
         Args:
             gs_id: Google Scholar author ID (e.g., 'waVL0PgAAAAJ')
-            
+            author_name: Optional author name (fallback if the profile name
+                         cannot be scraped)
+
         Returns:
             Author object with h-index, affiliation, etc.
         """
@@ -1501,14 +1554,16 @@ class GoogleScholarClient:
             
             # Extract author name
             name_elem = soup.find('div', id='gsc_prf_in')
-            name = name_elem.get_text(strip=True) if name_elem else 'Unknown'
-            
+            name = name_elem.get_text(strip=True) if name_elem else (author_name or 'Unknown')
+
             # Extract affiliation
             affiliation_elem = soup.find('div', class_='gsc_prf_il')
             affiliation = affiliation_elem.get_text(strip=True) if affiliation_elem else 'Unknown'
-            
-            # Extract h-index from stats table
+
+            # Extract h-index AND total citations from stats table
+            # (same parsing as get_authors_by_gs_ids_batch)
             h_index = 0
+            citation_count = 0
             stats_table = soup.find('table', id='gsc_rsb_st')
             if stats_table:
                 rows = stats_table.find_all('tr')
@@ -1521,30 +1576,35 @@ class GoogleScholarClient:
                                 h_index = int(cells[1].get_text(strip=True))
                             except ValueError:
                                 pass
-                            break
-            
+                        elif 'citations' in label:
+                            try:
+                                citation_count = int(cells[1].get_text(strip=True))
+                            except ValueError:
+                                pass
+
             # Extract homepage if available
             homepage = None
             homepage_link = soup.find('a', class_='gsc_prf_ila')
             if homepage_link:
                 homepage = homepage_link.get('href', '')
-            
+
             institution_type = self._get_institution_type(affiliation)
-            
+
             print(f"[Google Scholar] ✓ Got profile: {name} (h={h_index}, {affiliation[:30]}...)")
-            
+
             return Author(
                 name=name,
                 h_index=h_index,
                 affiliation=affiliation,
                 institution_type=institution_type,
                 works_count=0,
-                citation_count=0,
+                citation_count=citation_count,
                 google_scholar_id=gs_id,
-                homepage=homepage,
-                h_index_source='google_scholar'
+                homepage=homepage or '',
+                h_index_source='google_scholar',
+                match_confidence='id'  # Resolved via unique GS profile ID
             )
-            
+
         except Exception as e:
             print(f"[Google Scholar] ⚠️ Error getting author profile: {str(e)[:50]}")
             return None

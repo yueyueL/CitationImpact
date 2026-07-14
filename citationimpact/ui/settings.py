@@ -117,6 +117,47 @@ class SettingsManager:
         """Clear the terminal screen."""
         self.console.clear()
 
+    def _my_publications_cache_files(self):
+        """Cache files holding the 'My Papers' publication lists.
+
+        MyPublicationsCache stores its files in the same author_cache
+        directory as AuthorProfileCache, so profile-cache operations need
+        to know which files belong to the publications cache.
+        """
+        from citationimpact.cache import get_my_publications_cache
+        pub_cache = get_my_publications_cache()
+        files = []
+        for author_id, source in (
+            (self.config.get('default_google_scholar_author_id'), 'google_scholar'),
+            (self.config.get('default_semantic_scholar_author_id'), 'api'),
+        ):
+            if author_id:
+                files.append(pub_cache._get_cache_file(pub_cache._get_cache_key(author_id, source)))
+        return files
+
+    def _clear_author_profiles(self, author_cache) -> int:
+        """Clear author profiles while preserving the My Papers publications cache.
+
+        AuthorProfileCache.clear() wipes every *.json in the shared
+        author_cache directory, which would silently delete the user's
+        expensive (no-expiry) publications list too.
+        """
+        snapshots = []
+        for cache_file in self._my_publications_cache_files():
+            if cache_file.exists():
+                try:
+                    snapshots.append((cache_file, cache_file.read_text(encoding='utf-8')))
+                except OSError:
+                    pass
+        count = author_cache.clear()
+        for cache_file, content in snapshots:
+            try:
+                cache_file.write_text(content, encoding='utf-8')
+                count -= 1
+            except OSError:
+                pass
+        return max(count, 0)
+
     def _edit_h_index_threshold(self):
         """Edit h-index threshold setting."""
         self.console.print("\n[info]High-Profile Scholar Threshold[/info]")
@@ -317,8 +358,13 @@ class SettingsManager:
                     cache_count += 1
 
             if author_cache_dir.exists():
+                pub_cache_names = {f.name for f in self._my_publications_cache_files()}
                 for f in author_cache_dir.glob("*.json"):
                     total_size += f.stat().st_size
+                    # The index and the My Papers publications cache live in
+                    # the same directory but are not author profiles
+                    if f.name == '_index.json' or f.name in pub_cache_names:
+                        continue
                     author_cache_count += 1
 
             size_mb = total_size / (1024 * 1024)
@@ -354,12 +400,13 @@ class SettingsManager:
                 count = result_cache.clear()
                 self.console.print(f"[success]✓ Cleared {count} analysis results[/success]")
         elif choice == '5':
+            self.console.print("\n[dim]Your saved 'My Papers' publications list will be kept.[/dim]")
             if Confirm.ask("[warning]Clear ALL author profile cache?[/warning]", default=False):
                 author_cache = get_author_cache()
-                count = author_cache.clear()
+                count = self._clear_author_profiles(author_cache)
                 self.console.print(f"[success]✓ Cleared {count} author profiles[/success]")
         elif choice == '6':
-            if Confirm.ask("[warning]Clear ALL caches?[/warning]", default=False):
+            if Confirm.ask("[warning]Clear ALL caches (including your saved 'My Papers' publications list)?[/warning]", default=False):
                 result_cache = get_result_cache()
                 author_cache = get_author_cache()
                 count1 = result_cache.clear()
@@ -503,7 +550,7 @@ class SettingsManager:
         
         if choice.lower() == 'all':
             if Confirm.ask("[warning]Delete ALL cached author profiles?[/warning]", default=False):
-                count = author_cache.clear()
+                count = self._clear_author_profiles(author_cache)
                 self.console.print(f"[success]✓ Deleted {count} profiles[/success]")
         else:
             try:

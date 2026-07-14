@@ -139,7 +139,11 @@ class ORCIDClient:
                 work_summaries = group.get('work-summary', [])
                 if work_summaries:
                     work = work_summaries[0]  # Take first (usually most complete)
-                    works.append(self._parse_work(work))
+                    try:
+                        works.append(self._parse_work(work))
+                    except Exception as e:
+                        # Skip a malformed work instead of losing all works
+                        print(f"[ORCID] Skipping malformed work: {e}")
             
             return works
             
@@ -152,10 +156,11 @@ class ORCIDClient:
         person = data.get('person', {})
         activities = data.get('activities-summary', {})
         
-        # Get name
-        name_data = person.get('name', {})
-        given_name = name_data.get('given-names', {}).get('value', '')
-        family_name = name_data.get('family-name', {}).get('value', '')
+        # Get name (ORCID uses explicit JSON nulls, e.g. for private or
+        # missing name fields, so coalesce None before chaining .get())
+        name_data = person.get('name') or {}
+        given_name = (name_data.get('given-names') or {}).get('value') or ''
+        family_name = (name_data.get('family-name') or {}).get('value') or ''
         full_name = f"{given_name} {family_name}".strip()
         
         # Get current affiliation
@@ -203,30 +208,33 @@ class ORCIDClient:
     
     def _parse_work(self, work: Dict) -> Dict:
         """Parse ORCID work into common format"""
-        title = work.get('title', {}).get('title', {}).get('value', '')
-        
+        # ORCID uses explicit JSON nulls, so coalesce None before chaining .get()
+        title = ((work.get('title') or {}).get('title') or {}).get('value') or ''
+
         # Get year
         year = 0
         pub_date = work.get('publication-date')
         if pub_date and pub_date.get('year'):
-            year = int(pub_date['year'].get('value', 0))
-        
+            year_value = pub_date['year'].get('value')
+            if year_value:
+                year = int(year_value)
+
         # Get venue
-        venue = work.get('journal-title', {}).get('value', '') if work.get('journal-title') else ''
-        
+        venue = (work.get('journal-title') or {}).get('value') or ''
+
         # Get DOI
         doi = None
-        for ext_id in work.get('external-ids', {}).get('external-id', []):
+        for ext_id in (work.get('external-ids') or {}).get('external-id') or []:
             if ext_id.get('external-id-type') == 'doi':
                 doi = ext_id.get('external-id-value')
                 break
-        
+
         return {
             'title': title,
             'year': year,
             'venue': venue,
             'doi': doi,
-            'type': work.get('type', 'unknown'),
+            'type': work.get('type') or 'unknown',
             '_source': 'orcid'
         }
 

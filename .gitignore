@@ -1,0 +1,30 @@
+# User data — contains API keys, cached results, and settings. Never commit.
+.citationimpact/
+.CitationImpact/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# Tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Environments
+.venv/
+venv/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Exported reports (generated output)
+impact_report_*.json

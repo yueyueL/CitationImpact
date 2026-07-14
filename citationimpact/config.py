@@ -77,6 +77,10 @@ class ConfigManager:
             try:
                 with open(self.config_file, 'r') as f:
                     config = json.load(f)
+                if not isinstance(config, dict):
+                    print(f"Warning: Invalid config in {self.config_file}: "
+                          f"expected a JSON object, got {type(config).__name__}")
+                    return self.defaults.copy()
                 # Merge with defaults to handle new settings
                 return {**self.defaults, **config}
             except (json.JSONDecodeError, IOError) as e:
@@ -101,10 +105,18 @@ class ConfigManager:
             config = self.config
 
         try:
-            with open(self.config_file, 'w') as f:
-                json.dump(config, f, indent=2)
+            # Write to a temp file and atomically replace, so an interrupted
+            # or failed write can never truncate/corrupt the existing config
+            temp_file = self.config_file.with_suffix(self.config_file.suffix + '.tmp')
+            try:
+                with temp_file.open('w') as f:
+                    json.dump(config, f, indent=2)
+                temp_file.replace(self.config_file)
+            finally:
+                if temp_file.exists():
+                    temp_file.unlink(missing_ok=True)
             return True
-        except IOError as e:
+        except (IOError, TypeError) as e:
             print(f"Error: Could not save config to {self.config_file}: {e}")
             return False
 

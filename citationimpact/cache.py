@@ -51,42 +51,64 @@ class ResultCache:
         """Get cache file path for a cache key"""
         return self.cache_dir / f"{cache_key}.json"
 
-    def has_cached_result(self, paper_title: str, data_source: str = 'comprehensive') -> bool:
+    def has_cached_result(self, paper_title: str, data_source: str = 'comprehensive',
+                          params: Optional[Dict[str, Any]] = None) -> bool:
         """
         Check if a paper has cached analysis results (quick check, no file load)
-        
+
         Args:
             paper_title: Paper title
             data_source: 'api', 'google_scholar', or 'comprehensive'
-            
+            params: Optional analysis parameters (h_index_threshold, max_citations,
+                data_source) to probe first, e.g. the user's current settings
+
         Returns:
             True if cached result exists and is not expired
         """
-        # Check common parameter combinations
-        params_to_check = [
-            {'h_index_threshold': 20, 'max_citations': 100, 'data_source': data_source},
-            {'h_index_threshold': 20, 'max_citations': 100, 'data_source': 'api'},
-            {'h_index_threshold': 20, 'max_citations': 100, 'data_source': 'comprehensive'},
-        ]
-        
-        for params in params_to_check:
-            cache_key = self._get_cache_key(paper_title, params)
+        params_to_check = []
+
+        # Probe the caller-supplied parameter combination first
+        if params:
+            params_to_check.append({
+                'h_index_threshold': params.get('h_index_threshold', 20),
+                'max_citations': params.get('max_citations', 100),
+                'data_source': params.get('data_source', data_source),
+            })
+
+        # Probe the user's configured settings plus the legacy defaults,
+        # across every supported data source
+        config_manager = get_config_manager()
+        h_index_threshold = config_manager.get('h_index_threshold', 20)
+        max_citations = config_manager.get('max_citations', 100)
+        for source in (data_source, 'api', 'comprehensive', 'google_scholar'):
+            params_to_check.append({'h_index_threshold': h_index_threshold,
+                                    'max_citations': max_citations,
+                                    'data_source': source})
+            params_to_check.append({'h_index_threshold': 20, 'max_citations': 100,
+                                    'data_source': source})
+
+        checked_keys = set()
+        for probe in params_to_check:
+            cache_key = self._get_cache_key(paper_title, probe)
+            if cache_key in checked_keys:
+                continue
+            checked_keys.add(cache_key)
             cache_file = self._get_cache_file(cache_key)
-            
+
             if cache_file.exists():
                 try:
                     with open(cache_file, 'r') as f:
                         cached_data = json.load(f)
-                    
+
                     # Check expiry
                     cached_time = datetime.fromisoformat(cached_data['cached_at'])
                     age = datetime.now() - cached_time
-                    
+
                     if age <= timedelta(days=self.max_age_days):
                         return True
-                except (json.JSONDecodeError, KeyError, ValueError):
+                except (json.JSONDecodeError, KeyError, ValueError, OSError):
                     pass
-        
+
         return False
 
     def get(self, paper_title: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -116,7 +138,7 @@ class ResultCache:
 
             if age > timedelta(days=self.max_age_days):
                 # Cache expired
-                cache_file.unlink()  # Delete expired cache
+                cache_file.unlink(missing_ok=True)  # Delete expired cache
                 return None
 
             # Return cached result
@@ -124,11 +146,13 @@ class ResultCache:
             print(f"[Cache] Age: {age.days} days, {age.seconds // 3600} hours")
             return cached_data['result']
 
-        except (json.JSONDecodeError, KeyError, ValueError) as e:
+        except (json.JSONDecodeError, KeyError, ValueError, OSError) as e:
             print(f"[Cache] Warning: Could not load cache: {e}")
             # Delete corrupted cache
-            if cache_file.exists():
-                cache_file.unlink()
+            try:
+                cache_file.unlink(missing_ok=True)
+            except OSError:
+                pass
             return None
 
     def set(self, paper_title: str, params: Dict[str, Any], result: Dict[str, Any]) -> bool:
@@ -375,8 +399,42 @@ class AuthorProfileCache:
         orcid = author_info.get('orcid_id', '')
         if orcid:
             keys.append(f"orcid:{orcid}")
-        
+
         return keys
+
+    def _ids_match(self, info_a: Dict[str, Any], info_b: Dict[str, Any]) -> bool:
+        """True if two author dicts share at least one non-empty profile ID"""
+        for field in ('google_scholar_id', 'semantic_scholar_id', 'orcid_id'):
+            id_a = info_a.get(field) or ''
+            id_b = info_b.get(field) or ''
+            if id_a and id_b and id_a == id_b:
+                return True
+        return False
+
+    def _ids_conflict(self, info_a: Dict[str, Any], info_b: Dict[str, Any]) -> bool:
+        """True if two author dicts carry different non-empty values for the same ID"""
+        for field in ('google_scholar_id', 'semantic_scholar_id', 'orcid_id'):
+            id_a = info_a.get(field) or ''
+            id_b = info_b.get(field) or ''
+            if id_a and id_b and id_a != id_b:
+                return True
+        return False
+
+    def _load_profile(self, profile_filename: str) -> Optional[Dict[str, Any]]:
+        """Load a stored profile dict if its file exists and is not expired"""
+        cache_file = self.cache_dir / profile_filename
+        if not cache_file.exists():
+            return None
+        try:
+            with open(cache_file, 'r') as f:
+                cached_data = json.load(f)
+            cached_time = datetime.fromisoformat(cached_data['cached_at'])
+            age = datetime.now() - cached_time
+            if age <= timedelta(days=self.max_age_days):
+                return cached_data.get('profile', {})
+        except (json.JSONDecodeError, KeyError, ValueError, OSError):
+            pass
+        return None
 
     def _get_cache_key(self, author_id: str, data_source: str) -> str:
         """
@@ -401,61 +459,96 @@ class AuthorProfileCache:
         return self.cache_dir / f"{cache_key}.json"
     
     def get_by_any_id(
-        self, 
-        name: str = None, 
+        self,
+        name: str = None,
         google_scholar_id: str = None,
         semantic_scholar_id: str = None,
         orcid_id: str = None,
-        publications: List[Dict] = None
+        publications: List[Dict] = None,
+        verify_titles: Optional[List[str]] = None
     ) -> Optional[Dict[str, Any]]:
         """
         Get cached author profile by any available ID or publication match
-        
+
         Args:
             name: Author name
             google_scholar_id: Google Scholar ID
             semantic_scholar_id: Semantic Scholar ID
             orcid_id: ORCID identifier
             publications: List of publication dicts (for matching by paper overlap)
-            
+            verify_titles: Optional paper titles used to corroborate name-only
+                hits. When provided and the ONLY matching criterion was the
+                normalized name (no real ID matched), the cached profile is
+                returned only if at least one of these titles overlaps its
+                stored publications - two different researchers can share the
+                same name. Real-ID matches (gs/s2/orcid) are never filtered.
+
         Returns:
             Cached author_info dict or None
         """
-        # Try each ID type
-        lookup_keys = []
+        # Try each ID type. Real-ID keys and publication-overlap keys are
+        # authoritative; a bare name key may need title verification below.
+        lookup_keys = []  # (key, is_name_key) pairs
         if google_scholar_id:
-            lookup_keys.append(f"gs:{google_scholar_id}")
+            lookup_keys.append((f"gs:{google_scholar_id}", False))
         if semantic_scholar_id:
-            lookup_keys.append(f"s2:{semantic_scholar_id}")
+            lookup_keys.append((f"s2:{semantic_scholar_id}", False))
         if orcid_id:
-            lookup_keys.append(f"orcid:{orcid_id}")
+            lookup_keys.append((f"orcid:{orcid_id}", False))
         if name:
-            lookup_keys.append(f"name:{self._normalize_name(name)}")
-        
+            lookup_keys.append((f"name:{self._normalize_name(name)}", True))
+
         # Also try publication-based matching
         if publications:
             pub_keys = self._get_publication_keys(publications)
-            lookup_keys.extend(pub_keys)
-        
+            lookup_keys.extend((key, False) for key in pub_keys)
+
         # Check index for any matching key
-        for key in lookup_keys:
+        for key, is_name_key in lookup_keys:
             if key in self._index:
                 cache_file = self.cache_dir / self._index[key]
                 if cache_file.exists():
                     try:
                         with open(cache_file, 'r') as f:
                             cached_data = json.load(f)
-                        
+
                         # Check expiry
                         cached_time = datetime.fromisoformat(cached_data['cached_at'])
                         age = datetime.now() - cached_time
-                        
+
                         if age <= timedelta(days=self.max_age_days):
-                            return cached_data.get('profile', {}).get('author_info')
+                            profile = cached_data.get('profile', {})
+                            # A name-only hit may be a same-named different
+                            # person: when verify_titles is supplied, require
+                            # publication-title overlap before trusting it.
+                            # Skip (not return) so a later pub:* key can still
+                            # corroborate the match by publication overlap.
+                            if (is_name_key and verify_titles is not None
+                                    and not self._profile_titles_overlap(profile, verify_titles)):
+                                continue
+                            return profile.get('author_info')
                     except (json.JSONDecodeError, KeyError, ValueError):
                         pass
-        
+
         return None
+
+    def _profile_titles_overlap(self, profile: Dict[str, Any], verify_titles: List[str]) -> bool:
+        """True if any verify title matches a stored publication title"""
+        wanted = {self._normalize_title(t) for t in verify_titles if t}
+        wanted.discard('')
+        if not wanted:
+            return False
+        stored_pubs = list(profile.get('publications', []) or [])
+        # Some author_info dicts carry their own publications list
+        author_info = profile.get('author_info', {}) or {}
+        stored_pubs.extend(author_info.get('publications', []) or [])
+        for pub in stored_pubs:
+            if not isinstance(pub, dict):
+                continue
+            title = pub.get('title', '') or pub.get('bib', {}).get('title', '')
+            if title and self._normalize_title(title) in wanted:
+                return True
+        return False
     
     def update_profile(self, author_info: Dict[str, Any], publications: List[Dict] = None) -> bool:
         """
@@ -466,57 +559,110 @@ class AuthorProfileCache:
         
         Uses MULTIPLE matching strategies:
         1. ID-based: Google Scholar ID, Semantic Scholar ID, ORCID
-        2. Name-based: Normalized name
-        3. Publication-based: Match by shared paper titles (best for disambiguation!)
-        
+        2. Publication-based: Match by shared paper titles (best for disambiguation!)
+        3. Name-based: Normalized name, only when corroborated by a shared ID
+
         Args:
             author_info: Author information dict with profile IDs
             publications: List of publication dicts (optional, for matching)
-            
+
         Returns:
             True if updated successfully
         """
         publications = publications or []
-        
-        # Check if we have an existing profile by IDs first
-        existing = self.get_by_any_id(
-            name=author_info.get('name'),
-            google_scholar_id=author_info.get('google_scholar_id'),
-            semantic_scholar_id=author_info.get('semantic_scholar_id'),
-            orcid_id=author_info.get('orcid_id')
-        )
-        
-        # If not found by ID/name, try matching by publications
-        if not existing and publications:
-            existing = self.find_by_publications(publications)
-        
+
+        existing_profile = None
+        existing_filename = None
+
+        # 1) Match by authoritative IDs first (a bare name is NOT reliable:
+        #    two different researchers can share the same name)
+        id_keys = []
+        if author_info.get('google_scholar_id'):
+            id_keys.append(f"gs:{author_info['google_scholar_id']}")
+        if author_info.get('semantic_scholar_id'):
+            id_keys.append(f"s2:{author_info['semantic_scholar_id']}")
+        if author_info.get('orcid_id'):
+            id_keys.append(f"orcid:{author_info['orcid_id']}")
+        for key in id_keys:
+            filename = self._index.get(key)
+            if filename:
+                profile = self._load_profile(filename)
+                if profile and profile.get('author_info'):
+                    existing_profile, existing_filename = profile, filename
+                    break
+
+        # 2) If not found by ID, try matching by publication overlap
+        if not existing_profile and publications:
+            filename, _ = self._find_file_by_publications(publications)
+            if filename:
+                profile = self._load_profile(filename)
+                if profile and profile.get('author_info'):
+                    existing_profile, existing_filename = profile, filename
+
+        # 3) A name-only hit is merged ONLY when corroborated by a shared ID:
+        #    two "Li Li" with different IDs/papers are DIFFERENT people
+        if not existing_profile and author_info.get('name'):
+            filename = self._index.get(f"name:{self._normalize_name(author_info['name'])}")
+            if filename:
+                profile = self._load_profile(filename)
+                if (profile and profile.get('author_info')
+                        and self._ids_match(profile['author_info'], author_info)):
+                    existing_profile, existing_filename = profile, filename
+
+        existing = existing_profile.get('author_info') if existing_profile else None
+
+        # Never merge profiles whose IDs disagree - they are different people
+        if existing and self._ids_conflict(existing, author_info):
+            existing, existing_profile, existing_filename = None, None, None
+
         if existing:
             # Merge: keep existing values, add new non-empty values
             merged = existing.copy()
             for key, value in author_info.items():
+                if key in ('h_index', 'h_index_source'):
+                    continue  # handled below with source-aware logic
                 if value and (not merged.get(key) or merged.get(key) == 'Unknown'):
                     merged[key] = value
-            # Prefer higher h-index
-            if author_info.get('h_index', 0) > merged.get('h_index', 0):
-                merged['h_index'] = author_info['h_index']
+            # Source-aware h-index merge: a Google Scholar h-index is trusted
+            # over other sources regardless of value (much more accurate);
+            # within the same trust level, prefer the higher value
+            new_h = author_info.get('h_index', 0) or 0
+            old_h = merged.get('h_index', 0) or 0
+            new_is_gs = author_info.get('h_index_source') == 'google_scholar'
+            old_is_gs = merged.get('h_index_source') == 'google_scholar'
+            if new_h and ((new_is_gs and not old_is_gs)
+                          or (new_is_gs == old_is_gs and new_h > old_h)):
+                merged['h_index'] = new_h
                 merged['h_index_source'] = author_info.get('h_index_source', '')
             author_info = merged
-        
-        # Generate a unique profile filename
-        profile_id = hashlib.md5(
-            json.dumps(author_info, sort_keys=True).encode()
-        ).hexdigest()[:12]
-        profile_filename = f"profile_{profile_id}.json"
-        cache_file = self.cache_dir / profile_filename
-        
+
         # Extract just titles for storage (to keep cache small)
         pub_titles = []
         for pub in publications[:20]:  # Store top 20 publication titles
             title = pub.get('title', '') or pub.get('bib', {}).get('title', '')
             if title:
                 pub_titles.append({'title': title})
-        
+
+        # Preserve previously stored publication titles when this update
+        # does not supply any (e.g. a profile refresh from a GS-ID fetch)
+        if not pub_titles and existing_profile:
+            pub_titles = existing_profile.get('publications', []) or []
+
         try:
+            author_info = _sanitize_for_json(author_info)
+
+            # Reuse the matched profile's file so updates overwrite it in
+            # place: old index keys (incl. pub:*) keep pointing at current
+            # data and no orphaned profile files accumulate
+            if existing_filename:
+                profile_filename = existing_filename
+            else:
+                profile_id = hashlib.md5(
+                    json.dumps(author_info, sort_keys=True).encode()
+                ).hexdigest()[:12]
+                profile_filename = f"profile_{profile_id}.json"
+            cache_file = self.cache_dir / profile_filename
+
             # Save profile with publications
             cache_data = {
                 'profile': {
@@ -525,25 +671,31 @@ class AuthorProfileCache:
                 },
                 'cached_at': datetime.now().isoformat()
             }
-            
-            with open(cache_file, 'w') as f:
-                json.dump(cache_data, f, indent=2, ensure_ascii=False)
-            
+
+            temp_file = cache_file.with_suffix(cache_file.suffix + '.tmp')
+            try:
+                with temp_file.open('w', encoding='utf-8') as f:
+                    json.dump(cache_data, f, indent=2, ensure_ascii=False)
+                temp_file.replace(cache_file)
+            finally:
+                if temp_file.exists():
+                    temp_file.unlink(missing_ok=True)
+
             # Update index with all lookup keys (IDs + names)
             lookup_keys = self._get_lookup_keys(author_info)
             for key in lookup_keys:
                 self._index[key] = profile_filename
-            
+
             # Also index by publication titles (for disambiguation)
             pub_keys = self._get_publication_keys(publications)
             for key in pub_keys:
                 self._index[key] = profile_filename
-            
+
             self._save_index()
-            
+
             return True
-            
-        except (IOError, TypeError) as e:
+
+        except (IOError, TypeError, ValueError) as e:
             return False
     
     def find_by_publications(self, publications: List[Dict], min_overlap: int = 2) -> Optional[Dict[str, Any]]:
@@ -564,29 +716,8 @@ class AuthorProfileCache:
         Returns:
             Cached author_info dict or None
         """
-        if not publications:
-            return None
-        
-        # Get publication keys for incoming publications
-        pub_keys = self._get_publication_keys(publications)
-        if len(pub_keys) < min_overlap:
-            return None  # Not enough papers to match
-        
-        # Count matches per profile
-        profile_matches = {}  # profile_filename -> match count
-        for key in pub_keys:
-            if key in self._index:
-                profile_file = self._index[key]
-                profile_matches[profile_file] = profile_matches.get(profile_file, 0) + 1
-        
-        # Find profile with most matches (if >= min_overlap)
-        best_profile = None
-        best_count = 0
-        for profile_file, count in profile_matches.items():
-            if count >= min_overlap and count > best_count:
-                best_profile = profile_file
-                best_count = count
-        
+        best_profile, best_count = self._find_file_by_publications(publications, min_overlap)
+
         if best_profile:
             cache_file = self.cache_dir / best_profile
             if cache_file.exists():
@@ -599,8 +730,40 @@ class AuthorProfileCache:
                         return author_info
                 except (json.JSONDecodeError, KeyError):
                     pass
-        
+
         return None
+
+    def _find_file_by_publications(self, publications: List[Dict], min_overlap: int = 2):
+        """
+        Find the cached profile file sharing >= min_overlap publications
+
+        Returns:
+            Tuple of (profile filename or None, match count)
+        """
+        if not publications:
+            return None, 0
+
+        # Get publication keys for incoming publications
+        pub_keys = self._get_publication_keys(publications)
+        if len(pub_keys) < min_overlap:
+            return None, 0  # Not enough papers to match
+
+        # Count matches per profile
+        profile_matches = {}  # profile_filename -> match count
+        for key in pub_keys:
+            if key in self._index:
+                profile_file = self._index[key]
+                profile_matches[profile_file] = profile_matches.get(profile_file, 0) + 1
+
+        # Find profile with most matches (if >= min_overlap)
+        best_profile = None
+        best_count = 0
+        for profile_file, count in profile_matches.items():
+            if count >= min_overlap and count > best_count:
+                best_profile = profile_file
+                best_count = count
+
+        return best_profile, best_count
 
     def get(self, author_id: str, data_source: str) -> Optional[Dict[str, Any]]:
         """
@@ -630,15 +793,17 @@ class AuthorProfileCache:
 
             if age > timedelta(days=self.max_age_days):
                 # Cache expired
-                cache_file.unlink()  # Delete expired cache
+                cache_file.unlink(missing_ok=True)  # Delete expired cache
                 return None
 
             return cached_data['profile']
 
-        except (json.JSONDecodeError, KeyError, ValueError) as e:
+        except (json.JSONDecodeError, KeyError, ValueError, OSError) as e:
             # Delete corrupted cache
-            if cache_file.exists():
-                cache_file.unlink()
+            try:
+                cache_file.unlink(missing_ok=True)
+            except OSError:
+                pass
             return None
 
     def set(self, author_id: str, data_source: str, author_info: Dict[str, Any], publications: List[Dict]) -> bool:
